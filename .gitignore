@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Raw load-test output (large); curated results live in docs/experiments/
+load-tests/results/*
+!load-tests/results/.gitkeep
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

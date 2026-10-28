@@ -6,6 +6,7 @@
  *
  * Load-test users are loadtest+<n>@scalecart.local (n = 1..SEED_USERS), all with
  * SEED_USER_PASSWORD, so k6 can log in as thousands of different customers.
+ * The admin password comes from ADMIN_PASSWORD (.env).
  */
 import { DataSource } from 'typeorm';
 import { catalogDatabase } from './catalog/catalog.database.js';
@@ -20,9 +21,14 @@ const env = process.env;
 const PRODUCTS = Number(env.SEED_PRODUCTS ?? 1000);
 const STOCK = Number(env.SEED_STOCK ?? 100);
 const USERS = Number(env.SEED_USERS ?? 0);
-const USER_PASSWORD = env.SEED_USER_PASSWORD ?? 'loadtest-password';
-const ADMIN_EMAIL = env.ADMIN_EMAIL ?? 'admin@scalecart.local';
-const ADMIN_PASSWORD = env.ADMIN_PASSWORD ?? 'dev-admin-password';
+// Fake shoppers for load tests only; they exist nowhere but your local database.
+const USER_PASSWORD = env.SEED_USER_PASSWORD || 'loadtest-password';
+const ADMIN_EMAIL = env.ADMIN_EMAIL || 'admin@scalecart.local';
+// No default: an admin account with a published password would be an open door.
+const ADMIN_PASSWORD = env.ADMIN_PASSWORD ?? '';
+if (ADMIN_PASSWORD.length < 10) {
+  throw new Error('Set ADMIN_PASSWORD (10+ characters) in .env before seeding');
+}
 const BATCH = 1000;
 
 const ADJECTIVES = ['classic', 'modern', 'rugged', 'slim', 'cozy', 'vintage', 'premium', 'light', 'heavy', 'soft', 'sporty', 'elegant', 'compact', 'urban', 'outdoor', 'travel', 'everyday', 'limited', 'retro', 'pro'];

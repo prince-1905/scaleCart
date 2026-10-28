@@ -1,11 +1,22 @@
 import type { INestApplication } from '@nestjs/common';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
-import { createApp } from '../src/app.factory.js';
+import { createApp, listen } from '../src/app.factory.js';
+import { RedisService } from '../src/cache/redis.service.js';
 import { loadEnv, type HttpAdapterName } from '../src/config/env.js';
 import type { ModuleName } from '../src/database/database.js';
+
+// The Compose MySQL password lives in the repo's .env (never committed).
+const DOT_ENV = fileURLToPath(new URL('../../../.env', import.meta.url));
+if (existsSync(DOT_ENV)) process.loadEnvFile(DOT_ENV);
+if (!process.env.DB_PASSWORD) {
+  throw new Error('e2e tests need DB_PASSWORD: copy .env.example to .env at the repo root');
+}
 
 /**
  * E2E tests run against the Compose MySQL (localhost:3307) in their own databases
@@ -15,8 +26,11 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   DB_HOST: process.env.DB_HOST ?? '127.0.0.1',
   DB_PORT: process.env.DB_PORT ?? '3307',
   DB_USER: process.env.DB_USER ?? 'scalecart',
-  DB_PASSWORD: process.env.DB_PASSWORD ?? 'scalecart-dev-password',
+  DB_PASSWORD: process.env.DB_PASSWORD,
   DB_PREFIX: 'scalecart_test_',
+  // Redis database 1, so tests never touch the app's cache (database 0).
+  REDIS_URL: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1',
+  // Signs tokens for throwaway test apps only; never used by a real deployment.
   JWT_SECRET: 'test-only-secret-0123456789abcdefghijklmnop',
   HTTP_ACCESS_LOG: 'false',
   LOG_LEVEL: 'silent',
@@ -30,8 +44,21 @@ export async function startApp(
   const app = await createApp(env, { logger: false });
   // Listen on a random port: otherwise supertest starts a listener per request,
   // which piles up during the concurrency tests.
-  await app.listen(0, '127.0.0.1');
+  await listen(app, { ...env, port: 0 }, '127.0.0.1');
+  await waitForRedis(app);
   return app;
+}
+
+/** Redis connects in the background (the app never waits for it); tests do. */
+async function waitForRedis(app: INestApplication) {
+  const redis = app.get(RedisService);
+  for (let i = 0; i < 50 && !redis.isReady; i++) await sleep(20);
+}
+
+/** Current value of a Prometheus counter in this app instance, e.g. cache hits. */
+export async function metric(app: INestApplication, pattern: RegExp): Promise<number> {
+  const res = await http(app).get('/metrics').expect(200);
+  return Number(res.text.match(pattern)?.[1] ?? 0);
 }
 
 export const http = (app: INestApplication) => request(app.getHttpServer());

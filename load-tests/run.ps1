@@ -112,6 +112,7 @@ $meta = [pscustomobject]@{
   hostLogicalCores = $cores
   apiCpus      = $(if ($env:API_CPUS) { $env:API_CPUS } else { '1.0 (default)' })
   httpAdapter  = $(if ($env:HTTP_ADAPTER) { $env:HTTP_ADAPTER } else { 'fastify (default)' })
+  stockReservation = $(if ($env:STOCK_RESERVATION) { $env:STOCK_RESERVATION } else { 'atomic (default)' })
   durationSec  = $durationSec
   k6Cores      = & $stats ($samples.k6Cores)
   hostCpuPct   = & $stats ($samples.hostCpuPct)

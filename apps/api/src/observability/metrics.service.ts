@@ -55,6 +55,26 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  /**
+   * Argon2id time per call. Hashing runs on libuv's thread pool, not the event loop,
+   * so this can grow (pool queueing, CPU limit) while event-loop lag stays flat.
+   */
+  readonly passwordHashDuration = new Histogram({
+    name: 'password_hash_duration_seconds',
+    help: 'Time to hash or verify one password with Argon2id, including thread-pool queueing.',
+    labelNames: ['op'] as const,
+    buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+    registers: [this.registry],
+  });
+
+  /** Checkout results: created, out_of_stock, replayed, in_progress, ... (see CheckoutService). */
+  readonly checkouts = new Counter({
+    name: 'checkouts_total',
+    help: 'Checkout attempts by outcome.',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

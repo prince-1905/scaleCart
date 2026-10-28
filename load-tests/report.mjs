@@ -52,3 +52,27 @@ for (const r of rows) {
   );
 }
 console.log('\nRead it like this: a step is healthy when achieved ≈ target, dropped = 0 and p99 stays flat.');
+
+// Latency per request name (scripts tag requests with { name } and add a threshold on it).
+const named = Object.keys(metrics)
+  .map((k) => k.match(/^http_req_duration\{name:([^}]+)\}$/)?.[1])
+  .filter(Boolean);
+if (named.length) {
+  console.log('\n| request | count | p50 ms | p95 ms | p99 ms | max ms |');
+  console.log('|---|---|---|---|---|---|');
+  for (const n of named) {
+    const dur = metrics[`http_req_duration{name:${n}}`];
+    const count = metrics[`http_reqs{name:${n}}`]?.count ?? '-';
+    console.log(`| ${n} | ${count} | ${ms(dur.med)} | ${ms(dur['p(95)'])} | ${ms(dur['p(99)'])} | ${ms(dur.max)} |`);
+  }
+}
+
+// Custom counters defined by the script (k6's built-in metrics are skipped).
+const BUILTIN = new Set(['http_reqs', 'iterations', 'data_sent', 'data_received', 'dropped_iterations']);
+const counters = Object.entries(metrics).filter(
+  ([k, v]) => !k.includes('{') && !BUILTIN.has(k) && v.count !== undefined && v.rate !== undefined,
+);
+if (counters.length) {
+  console.log('');
+  for (const [k, v] of counters) console.log(`${k}: ${v.count}`);
+}

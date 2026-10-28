@@ -1,0 +1,88 @@
+import type { INestApplication } from '@nestjs/common';
+import { getDataSourceToken } from '@nestjs/typeorm';
+import { randomUUID } from 'node:crypto';
+import request from 'supertest';
+import type { DataSource } from 'typeorm';
+import { createApp } from '../src/app.factory.js';
+import { loadEnv, type HttpAdapterName } from '../src/config/env.js';
+import type { ModuleName } from '../src/database/database.js';
+
+/**
+ * E2E tests run against the Compose MySQL (localhost:3307) in their own databases
+ * (scalecart_test_*), recreated by global-setup.ts before every run.
+ */
+export const TEST_ENV: NodeJS.ProcessEnv = {
+  DB_HOST: process.env.DB_HOST ?? '127.0.0.1',
+  DB_PORT: process.env.DB_PORT ?? '3307',
+  DB_USER: process.env.DB_USER ?? 'scalecart',
+  DB_PASSWORD: process.env.DB_PASSWORD ?? 'scalecart-dev-password',
+  DB_PREFIX: 'scalecart_test_',
+  JWT_SECRET: 'test-only-secret-0123456789abcdefghijklmnop',
+  HTTP_ACCESS_LOG: 'false',
+  LOG_LEVEL: 'silent',
+};
+
+export async function startApp(
+  adapter: HttpAdapterName = 'fastify',
+  overrides: NodeJS.ProcessEnv = {},
+): Promise<INestApplication> {
+  const env = loadEnv({ ...TEST_ENV, HTTP_ADAPTER: adapter, ...overrides });
+  const app = await createApp(env, { logger: false });
+  // Listen on a random port: otherwise supertest starts a listener per request,
+  // which piles up during the concurrency tests.
+  await app.listen(0, '127.0.0.1');
+  return app;
+}
+
+export const http = (app: INestApplication) => request(app.getHttpServer());
+
+export const dataSource = (app: INestApplication, module: ModuleName): DataSource =>
+  app.get(getDataSourceToken(module), { strict: false });
+
+/** Unique per call, so test files can share the databases and run in parallel. */
+export const unique = (prefix: string) => `${prefix}-${randomUUID().slice(0, 8)}`;
+
+export interface TestUser {
+  email: string;
+  password: string;
+  accessToken: string;
+  refreshToken: string;
+}
+
+export async function registerUser(app: INestApplication): Promise<TestUser> {
+  const email = `${unique('user')}@test.local`;
+  const password = 'correct-horse-battery';
+  const res = await http(app).post('/auth/register').send({ email, password }).expect(201);
+  return { email, password, ...res.body };
+}
+
+export async function registerAdmin(app: INestApplication): Promise<TestUser> {
+  const user = await registerUser(app);
+  await dataSource(app, 'identity').query(`UPDATE users SET role = 'admin' WHERE email = ?`, [
+    user.email,
+  ]);
+  // The role is inside the access token, so log in again to get one that says admin.
+  const res = await http(app)
+    .post('/auth/login')
+    .send({ email: user.email, password: user.password })
+    .expect(200);
+  return { ...user, ...res.body };
+}
+
+export async function createProduct(
+  app: INestApplication,
+  admin: TestUser,
+  { priceCents = 1999, stock = 10, name = 'Test product' } = {},
+): Promise<number> {
+  const res = await http(app)
+    .post('/products')
+    .auth(admin.accessToken, { type: 'bearer' })
+    .send({ sku: unique('SKU'), name, priceCents, description: 'made for tests' })
+    .expect(201);
+  await http(app)
+    .put(`/inventory/${res.body.id}`)
+    .auth(admin.accessToken, { type: 'bearer' })
+    .send({ available: stock })
+    .expect(200);
+  return res.body.id;
+}

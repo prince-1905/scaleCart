@@ -10,7 +10,7 @@ export async function createApp(
 ): Promise<INestApplication> {
   const module = AppModule.forRoot(env);
 
-  // Same application code on either adapter, so they can be compared fairly (experiment E1).
+  // Same application code on either adapter, so they can be compared fairly (Phase 2 experiment).
   return env.httpAdapter === 'fastify'
     ? NestFactory.create(module, new FastifyAdapter(), options)
     : NestFactory.create(module, options);

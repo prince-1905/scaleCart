@@ -5,6 +5,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { Public } from '../common/auth.js';
 
 const MAX_MS = 1000;
 
@@ -20,6 +21,7 @@ function parseMs(raw: string | undefined): number {
  * Endpoints that exist only for performance experiments (enabled with LAB_ENDPOINTS=true).
  * They isolate one behaviour each so its effect on the event loop can be measured.
  */
+@Public()
 @Controller('lab')
 export class LabController {
   /** Near-zero work: measures pure framework + network overhead. */

@@ -23,6 +23,13 @@ describe('loadEnv', () => {
       accessTokenTtlSeconds: 900,
       refreshTokenTtlDays: 30,
       stockReservation: 'atomic',
+      listenBacklog: 4096,
+      redisUrl: 'redis://127.0.0.1:6379',
+      cacheEnabled: true,
+      cacheTtlSeconds: 60,
+      loginMaxFailures: 5,
+      loginFailureWindowSeconds: 900,
+      apiDocs: true,
     });
   });
 

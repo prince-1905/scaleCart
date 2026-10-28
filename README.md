@@ -13,8 +13,8 @@ Kubernetes · Prometheus · Grafana · k6
 |---|---|---|
 | 0 | Measurement harness, event-loop experiments | ✅ done |
 | 1 | Shop core: auth, catalog, cart, checkout (modular monolith) | ✅ done |
-| 2 | Caching + runtime experiments (Fastify vs Express, CPU scaling) | next |
-| 3 | RabbitMQ, transactional outbox, notification worker | |
+| 2 | Redis cache, login limits, Swagger, runtime experiments (Fastify vs Express, scaling) | ✅ done |
+| 3 | RabbitMQ, transactional outbox, notification worker | next |
 | 4 | Payment simulator, idempotency, saga | |
 | 7-light | Kubernetes (kind), HPA, connection pooling | |
 | later | 2FA · microservice split · tracing · cloud capacity tests · polish | |
@@ -29,6 +29,11 @@ Kubernetes · Prometheus · Grafana · k6
   UPDATE sold exactly 100 in every run. **0 duplicate orders** from 3,000 double-clicked requests.
   Login ≈ **22/s per CPU** (~60× costlier than a product read) and made other endpoints' p99 **8–11× worse**
   via CPU throttling. Keyset pagination: **1 ms vs 70 ms** for deep pages.
+- [E2 — accept-queue fix, Redis cache, Fastify vs Express, scaling](docs/experiments/E2-cache-adapters-scaling.md):
+  burst 504s traced to Node's 511-place accept queue (**4,322 overflows → 0**, 1,000/1,000 buyers served).
+  Redis cache-aside: **1.6–2.1× throughput, 95–97% fewer MySQL reads** on popular products. Fastify vs Express:
+  **+40%** empty endpoint, **+25%** real one. DB reads scale **out** (2×1 CPU: 1.8×) but logins scale **up**
+  (1×4 CPUs: 4.7× vs 4×1 CPU: 3.0–3.7×, explained by CPU throttling).
 
 How the whole app works, step by step (no code): [docs/scalecart-workflow.md](docs/scalecart-workflow.md)
 Interview notes per phase: [docs/interview-notes/](docs/interview-notes/)
@@ -38,8 +43,10 @@ Interview notes per phase: [docs/interview-notes/](docs/interview-notes/)
 Requires Docker Desktop, Node 24, and k6.
 
 ```powershell
-docker compose up -d --build          # mysql, migrate job, api, nginx, prometheus, grafana
-# demo + load-test data: admin@scalecart.local / dev-admin-password, loadtest+1..2000@scalecart.local / loadtest-password
+Copy-Item .env.example .env           # then put your own passwords/secrets in .env (never committed)
+docker compose up -d --build          # mysql, redis, migrate job, api, nginx, prometheus, grafana
+# demo + load-test data: admin@scalecart.local (password = ADMIN_PASSWORD in .env),
+# loadtest+1..2000@scalecart.local (password = SEED_USER_PASSWORD in .env)
 docker compose run --rm -e SEED_PRODUCTS=200000 -e SEED_USERS=2000 migrate node dist/seed.js
 curl http://localhost:8088/products?q=leather%20boot
 ```
@@ -49,16 +56,20 @@ curl http://localhost:8088/products?q=leather%20boot
 | http://localhost:8088 | API via NGINX load balancer |
 | http://localhost:3001 | Grafana dashboard ("ScaleCart - Overview") |
 | http://localhost:9090 | Prometheus |
-| localhost:3307 | MySQL (user `scalecart`, one database per module: `scalecart_identity`, `_catalog`, `_inventory`, `_cart`, `_orders`) |
+| localhost:6379 | Redis (cache + login-failure counters; optional, the API works without it) |
+| localhost:3307 | MySQL (user `scalecart`, password `DB_PASSWORD` from .env; one database per module: `scalecart_identity`, `_catalog`, `_inventory`, `_cart`, `_orders`) |
 
-### API (Phase 1)
+### API
+
+Try every endpoint in the browser: **http://localhost:8088/docs** (Swagger). Log in with `POST /auth/login`,
+click **Authorize**, paste the `accessToken`.
 
 | Endpoint | Auth | What |
 |---|---|---|
 | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout` | – | JWT access token (15 min) + rotating refresh token |
 | `GET /auth/me` | user | Current user |
 | `GET /products?q=&after=&limit=`, `GET /products/:id` | – | FULLTEXT search, keyset pagination |
-| `POST /products` | admin | Create product |
+| `POST /products` · `PATCH /products/:id` | admin | Create / update product (update clears the cached copy) |
 | `GET /inventory/:productId` · `PUT /inventory/:productId` | – · admin | Stock |
 | `GET /cart` · `PUT /cart/items/:productId` · `DELETE /cart` | user | Cart (prices always from the catalog) |
 | `POST /checkout` (header `Idempotency-Key`) | user | Cart → order; can't oversell, can't double-order |
@@ -69,7 +80,7 @@ curl http://localhost:8088/products?q=leather%20boot
 ```powershell
 cd apps/api
 npm test              # unit tests
-npm run test:e2e      # needs `docker compose up -d mysql`; uses separate scalecart_test_* databases
+npm run test:e2e      # needs `docker compose up -d mysql redis`; uses scalecart_test_* databases + Redis db 1
 ```
 
 ### Experiments
@@ -85,8 +96,8 @@ $env:STOCK_RESERVATION='naive'; docker compose up -d --wait api; docker compose 
 cd apps/api; node scripts/e1-queries.ts                             # search + pagination inside MySQL
 ```
 
-Useful knobs: `API_REPLICAS`, `API_CPUS`, `HTTP_ADAPTER=fastify|express`, `STOCK_RESERVATION=atomic|locking|naive`,
-`DB_POOL_SIZE`, `LB_PORT` (default 8088). After recreating the API container, restart `lb` so NGINX re-resolves it.
+Useful knobs: `API_REPLICAS`, `API_CPUS`, `HTTP_ADAPTER=fastify|express`, `CACHE_ENABLED`, `HTTP_LISTEN_BACKLOG`,
+`STOCK_RESERVATION=atomic|locking|naive`, `DB_POOL_SIZE`, `LB_PORT` (default 8088). After recreating the API container, restart `lb` so NGINX re-resolves it.
 
 ## Layout
 

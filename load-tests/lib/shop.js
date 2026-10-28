@@ -4,7 +4,8 @@ import { BASE_URL } from './steps.js';
 
 export const JSON_HEADERS = { 'Content-Type': 'application/json' };
 export const ADMIN_EMAIL = __ENV.ADMIN_EMAIL || 'admin@scalecart.local';
-export const ADMIN_PASSWORD = __ENV.ADMIN_PASSWORD || 'dev-admin-password';
+// From .env (run.ps1 loads it). Only scripts that log in as admin need it.
+export const ADMIN_PASSWORD = __ENV.ADMIN_PASSWORD || '';
 export const USER_PASSWORD = __ENV.SEED_USER_PASSWORD || 'loadtest-password';
 
 /** Seeded by `SEED_USERS=n node dist/seed.js`. */
@@ -15,6 +16,7 @@ export const auth = (token, extra = {}) => ({
 });
 
 export function login(email, password) {
+  if (!password) throw new Error(`no password for ${email}: set ADMIN_PASSWORD in .env`);
   const res = http.post(`${BASE_URL}/auth/login`, JSON.stringify({ email, password }), {
     headers: JSON_HEADERS,
     tags: { name: 'login' },

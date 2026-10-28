@@ -8,14 +8,19 @@
  * to read performance_schema (rows examined per statement). Lab tool, not app code.
  */
 import { createConnection, type RowDataPacket } from 'mysql2/promise';
+import { existsSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
+
+const DOT_ENV = new URL('../../../.env', import.meta.url);
+if (existsSync(DOT_ENV)) process.loadEnvFile(DOT_ENV);
+if (!process.env.MYSQL_ROOT_PASSWORD) throw new Error('Set MYSQL_ROOT_PASSWORD in the repo-root .env');
 
 const RUNS = Number(process.env.RUNS ?? 30);
 const conn = await createConnection({
   host: '127.0.0.1',
   port: Number(process.env.DB_PORT ?? 3307),
   user: 'root',
-  password: process.env.MYSQL_ROOT_PASSWORD ?? 'root-dev-password',
+  password: process.env.MYSQL_ROOT_PASSWORD,
   database: 'scalecart_catalog',
 });
 

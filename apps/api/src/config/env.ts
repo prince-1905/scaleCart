@@ -40,6 +40,21 @@ export interface Env {
   accessTokenTtlSeconds: number;
   refreshTokenTtlDays: number;
   stockReservation: StockReservationStrategy;
+  /**
+   * Size of the kernel queue for connections not yet accepted by Node. Node's default
+   * is 511; a 2,000-request burst overflowed it (experiment E2). The kernel caps it
+   * at net.core.somaxconn.
+   */
+  listenBacklog: number;
+  redisUrl: string;
+  /** Cache-aside for public product reads. Off = every read goes to MySQL (for experiments). */
+  cacheEnabled: boolean;
+  cacheTtlSeconds: number;
+  /** Failed logins per email within the window before login is refused with 429. */
+  loginMaxFailures: number;
+  loginFailureWindowSeconds: number;
+  /** Serves the Swagger UI at /docs and the OpenAPI document at /docs-json. */
+  apiDocs: boolean;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -105,6 +120,13 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     accessTokenTtlSeconds: positiveInt(source, 'ACCESS_TOKEN_TTL_SECONDS', 900),
     refreshTokenTtlDays: positiveInt(source, 'REFRESH_TOKEN_TTL_DAYS', 30),
     stockReservation,
+    listenBacklog: positiveInt(source, 'HTTP_LISTEN_BACKLOG', 4096),
+    redisUrl: source.REDIS_URL ?? 'redis://127.0.0.1:6379',
+    cacheEnabled: bool(source.CACHE_ENABLED, true),
+    cacheTtlSeconds: positiveInt(source, 'CACHE_TTL_SECONDS', 60),
+    loginMaxFailures: positiveInt(source, 'LOGIN_MAX_FAILURES', 5),
+    loginFailureWindowSeconds: positiveInt(source, 'LOGIN_FAILURE_WINDOW_SECONDS', 900),
+    apiDocs: bool(source.API_DOCS, true),
   };
 }
 

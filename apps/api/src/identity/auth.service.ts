@@ -7,6 +7,7 @@ import type { Role } from '../common/auth.js';
 import { uuidv7 } from '../common/uuid.js';
 import { ENV, type Env } from '../config/env.js';
 import { isDuplicateKey, type WriteResult } from '../database/database.js';
+import { LoginThrottle } from './login-throttle.js';
 import { PasswordHasher } from './password-hasher.js';
 import { RefreshToken } from './refresh-token.entity.js';
 import { User } from './user.entity.js';
@@ -44,6 +45,7 @@ export class AuthService {
     @Inject(ENV) private readonly env: Env,
     private readonly jwt: JwtService,
     private readonly hasher: PasswordHasher,
+    private readonly throttle: LoginThrottle,
   ) {
     this.users = db.getRepository(User);
     this.tokens = db.getRepository(RefreshToken);
@@ -68,11 +70,19 @@ export class AuthService {
   }
 
   async login(email: string, password: string): Promise<TokenPair> {
-    const user = await this.users.findOneBy({ email: normalizeEmail(email) });
+    const normalized = normalizeEmail(email);
+    // Before any hashing: a blocked guess must not cost CPU.
+    await this.throttle.assertAllowed(normalized);
+
+    const user = await this.users.findOneBy({ email: normalized });
     const ok = user
       ? await this.hasher.verify(user.passwordHash, password)
       : await this.hasher.verifyAgainstDummy(password);
-    if (!user || !ok) throw new UnauthorizedException(INVALID_LOGIN);
+    if (!user || !ok) {
+      await this.throttle.recordFailure(normalized);
+      throw new UnauthorizedException(INVALID_LOGIN);
+    }
+    await this.throttle.reset(normalized);
     return this.issueTokens(user, uuidv7());
   }
 

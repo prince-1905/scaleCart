@@ -40,3 +40,21 @@ export class CreateProductDto {
   @Max(100_000_000)
   priceCents: number;
 }
+
+export class UpdateProductDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(5000)
+  description?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100_000_000)
+  priceCents?: number;
+}

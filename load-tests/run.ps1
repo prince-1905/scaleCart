@@ -35,6 +35,17 @@ $summary = Join-Path $results "$runId.summary.json"
 $log = Join-Path $results "$runId.log"
 $loadgen = Join-Path $results "$runId.loadgen.json"
 
+# Passwords the scripts log in with come from the repo's .env (never committed).
+# k6 sees the process environment, so loading them here is enough.
+$dotEnv = Join-Path (Split-Path $here -Parent) '.env'
+if (Test-Path $dotEnv) {
+  foreach ($line in Get-Content $dotEnv) {
+    if ($line -match '^\s*(ADMIN_PASSWORD|SEED_USER_PASSWORD)\s*=\s*(.*?)\s*$') {
+      Set-Item "Env:$($Matches[1])" $Matches[2]
+    }
+  }
+}
+
 $env:K6_PROMETHEUS_RW_SERVER_URL = 'http://localhost:9090/api/v1/write'
 $env:K6_PROMETHEUS_RW_TREND_STATS = 'p(50),p(95),p(99),max'
 
@@ -81,8 +92,8 @@ $k6.WaitForExit()
 $durationSec = [int][math]::Ceiling(((Get-Date) - $startedAt).TotalSeconds)
 
 # Server side, over the whole run: peak CPU (cores) and peak event-loop utilization across API instances.
-function Invoke-PromMax([string]$expr) {
-  $q = [uri]::EscapeDataString("max_over_time(($expr)[${durationSec}s:5s])")
+function Invoke-PromMax([string]$expr, [int]$window = $durationSec) {
+  $q = [uri]::EscapeDataString("max_over_time(($expr)[${window}s:5s])")
   try {
     $r = Invoke-RestMethod "http://localhost:9090/api/v1/query?query=$q"
     if ($r.data.result.Count -gt 0) { return [math]::Round([double]$r.data.result[0].value[1], 2) }
@@ -91,6 +102,9 @@ function Invoke-PromMax([string]$expr) {
 }
 $apiCpuMax = Invoke-PromMax 'max(rate(process_cpu_seconds_total{job="api"}[10s]))'
 $apiEluMax = Invoke-PromMax 'max(nodejs_eventloop_utilization_ratio)'
+# Successful requests per second by all API instances together (best 20 s window). The first
+# 13 s are skipped: a 20 s rate window there still contains the previous run's traffic.
+$apiPeakRps = Invoke-PromMax 'sum(rate(http_server_request_duration_seconds_count{job="api",status_code=~"2.."}[20s]))' ([math]::Max(5, $durationSec - 13))
 
 $stats = {
   param($values)
@@ -113,6 +127,10 @@ $meta = [pscustomobject]@{
   apiCpus      = $(if ($env:API_CPUS) { $env:API_CPUS } else { '1.0 (default)' })
   httpAdapter  = $(if ($env:HTTP_ADAPTER) { $env:HTTP_ADAPTER } else { 'fastify (default)' })
   stockReservation = $(if ($env:STOCK_RESERVATION) { $env:STOCK_RESERVATION } else { 'atomic (default)' })
+  apiReplicas  = $(if ($env:API_REPLICAS) { $env:API_REPLICAS } else { '1 (default)' })
+  cacheEnabled = $(if ($env:CACHE_ENABLED) { $env:CACHE_ENABLED } else { 'true (default)' })
+  listenBacklog = $(if ($env:HTTP_LISTEN_BACKLOG) { $env:HTTP_LISTEN_BACKLOG } else { '4096 (default)' })
+  apiPeakRps   = $apiPeakRps
   durationSec  = $durationSec
   k6Cores      = & $stats ($samples.k6Cores)
   hostCpuPct   = & $stats ($samples.hostCpuPct)
@@ -127,6 +145,7 @@ Write-Host ("  k6 CPU        avg {0} / max {1} cores" -f $meta.k6Cores.avg, $met
 Write-Host ("  Host CPU      avg {0}% / max {1}%" -f $meta.hostCpuPct.avg, $meta.hostCpuPct.max)
 Write-Host "Server side (peak during run, from Prometheus):"
 Write-Host ("  API CPU       max {0} cores   |   event-loop utilization max {1}" -f $apiCpuMax, $apiEluMax)
+Write-Host ("  API throughput peak {0} req/s (all instances, best 20 s window)" -f $apiPeakRps)
 if ($meta.hostCpuPct.max -gt 85) {
   Write-Warning 'Host CPU exceeded 85%: k6 and the app competed for CPU. Treat the highest steps as suspect.'
 }

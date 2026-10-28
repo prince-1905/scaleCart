@@ -75,6 +75,22 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  /** Cache lookups: hit, miss, coalesced (waited for another request's load), unavailable (Redis down). */
+  readonly cacheRequests = new Counter({
+    name: 'cache_requests_total',
+    help: 'Cache-aside lookups by cache name and result.',
+    labelNames: ['cache', 'result'] as const,
+    registers: [this.registry],
+  });
+
+  /** Redis commands that failed or timed out. The app carries on without Redis (fail open). */
+  readonly redisErrors = new Counter({
+    name: 'redis_errors_total',
+    help: 'Redis commands that failed, timed out, or were skipped because Redis was not connected.',
+    labelNames: ['op'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

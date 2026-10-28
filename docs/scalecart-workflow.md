@@ -30,10 +30,16 @@ an interviewer through any request from start to finish.
    │                                                               │
    │   identity    catalog    inventory    cart    orders          │
    └────┬────────────┬───────────┬───────────┬────────┬────────────┘
+        │            │  ┌─────────────────────────┐
+        │            └─►│ Redis (fast memory)      │  copies of product pages,
+        └──────────────►│ OPTIONAL: app works      │  failed-login counters
+                        │ without it, just slower  │
+                        └─────────────────────────┘
         ▼            ▼           ▼           ▼        ▼
    ┌──────────────────────────────────────────────────────────────┐
    │  MySQL server, with 5 separate databases (one per module)     │
    │  identity · catalog · inventory · cart · orders               │
+   │  = the SOURCE OF TRUTH: anything important lives here         │
    └──────────────────────────────────────────────────────────────┘
 
    Prometheus ── every 5 s asks the API "how are you doing?" (/metrics) and stores the numbers
@@ -45,6 +51,7 @@ an interviewer through any request from start to finish.
 | **NGINX** | Front door / traffic cop. Clients never talk to the app directly. | Docker, port 8088 |
 | **API** | The actual shop logic. Node.js + NestJS framework + Fastify (fast web server). | Docker, limited to 1 CPU |
 | **MySQL** | Where everything is stored permanently. | Docker, port 3307 |
+| **Redis** | Super-fast memory store. Holds *copies* (cache) and counters, never anything we can't lose. | Docker, port 6379 |
 | **migrate job** | Runs once at startup to create the databases and tables, then exits. | Docker |
 | **Prometheus** | Collects performance numbers (speed, errors, CPU). | Docker, port 9090 |
 | **Grafana** | Dashboard showing those numbers as charts. | Docker, port 3001 |
@@ -57,9 +64,10 @@ Everything starts with one command: `docker compose up -d`.
 ## 3. What happens when you start the app
 
 ```
-1. MySQL starts            → creates the app's database user
+1. MySQL + Redis start     → MySQL creates the app's database user
 2. migrate job runs        → creates 5 databases + their tables, then stops
-3. API starts              → opens connections to its 5 databases (5 connections each)
+3. API starts              → opens connections to its 5 databases (5 connections each),
+                              connects to Redis in the background (doesn't wait for it)
 4. NGINX starts            → begins accepting customer requests on port 8088
 5. Prometheus + Grafana    → start watching the API
 (6. seed script, run by hand → fills in demo data: 200,000 products, 2,000 test users, 1 admin)
@@ -82,6 +90,16 @@ department's notebook. If one department needs something, it **asks** the other 
 | **inventory** | How many items are left | `stock`: product → units available · `reservations`: "order X took 2 of product Y" (reserved / released) |
 | **cart** | Each user's cart | `cart_items`: user, product, quantity (max 10 each, max 50 different products) |
 | **orders** | Checkout and order history | `orders`: who, total, status · `order_items`: **copy** of name + price at the time of purchase · `idempotency_keys`: remembers each checkout attempt and its answer |
+
+**What lives in Redis** (copies and counters only; losing Redis loses nothing important):
+
+| Key | Example | Lives for | Owner |
+|---|---|---|---|
+| Cached product page | `catalog:product:v1:42` → the product's JSON | ~60 s | catalog |
+| Cached "doesn't exist" | `catalog:product:v1:999999` → null | ~10 s | catalog |
+| Failed logins per email | `identity:login-failures:<hash of email>` → 3 | 15 min | identity |
+
+Stock, orders, carts and idempotency keys are **never** in Redis: they must survive a crash and be exact.
 
 **Why separate databases?** Later, any module can become its own service (microservice) just by
 moving its database. Nothing else has to change, because nobody else reads its tables.
@@ -129,10 +147,14 @@ After the microservice split, these same path rules move into NGINX / an API gat
 
 ```
 1. Customer sends email + password
-2. identity: find user, check the password against the stored hash
+2. identity asks Redis: "has this email failed 5 times in the last 15 min?"
+   - yes → 429 "too many failed logins" right away, WITHOUT the expensive password check
+     (so a guessing flood can't eat our CPU either)
+3. identity: find user, check the password against the stored hash
    - unknown email? Still do a fake check, so the answer takes the same time
      (otherwise an attacker could tell which emails have accounts by timing)
-3. Return:
+   - wrong → count +1 in Redis.  Right → reset the count.
+4. Return:
    • ACCESS TOKEN  : valid 15 min. A signed note: "user 123, role customer".
                      Stored NOWHERE on the server. The signature proves we made it.
    • REFRESH TOKEN : valid 30 days. A long random string. Server stores only its hash.
@@ -158,6 +180,24 @@ The **refresh token** is the ticket you show at the gate to get a new wristband 
 2. catalog: ask MySQL using the search index (FULLTEXT) on name + description
 3. Return 20 products + a bookmark ("nextAfter") for the next page
 ```
+
+**Opening one product page (`GET /products/42`) uses the cache ("cache-aside"):**
+
+```
+1. catalog asks Redis: "do you have product 42?"
+   ├─ yes (HIT)  → return it. MySQL is not touched.
+   └─ no  (MISS) → read MySQL → save a copy in Redis for ~60 s → return it
+2. 500 people miss the same product at the same moment? Only ONE of them reads MySQL;
+   the other 499 wait for that answer ("request coalescing"). Otherwise an expiring
+   popular product would hit MySQL 500 times at once ("cache stampede").
+3. Redis down or slow (>200 ms)? Skip it and read MySQL. The shop keeps working.
+```
+
+**Admin changes a price (`PATCH /products/42`):** write MySQL first, then **delete** the Redis copy.
+The next visitor gets a miss and loads the new price.
+
+**Money never comes from the cache.** Cart totals and checkout read prices straight from MySQL. A product
+page can be a few seconds stale; the amount we charge can't.
 
 **Pages use a bookmark, not page numbers:** "give me 20 products after id 5,000". The database
 jumps straight there. "Skip 5,000 and give me 20" would read 5,000 rows and throw them away.
@@ -240,7 +280,8 @@ Asking for someone else's order id → "not found" (we don't even admit it exist
 |---|---|---|
 | `/health/live` | API | "Is the app alive?" Checks nothing else. |
 | `/health/ready` | API | "Can it serve customers?" Pings all 5 databases. |
-| `/metrics` | API → Prometheus → Grafana | Requests per second, response times (p50/p95/p99), errors, CPU, event-loop busy %, login hashing time, checkout outcomes (created / sold out / replayed) |
+| `/metrics` | API → Prometheus → Grafana | Requests per second, response times (p50/p95/p99), errors, CPU, event-loop busy %, login hashing time, checkout outcomes (created / sold out / replayed), cache hits/misses, Redis errors |
+| `/docs` | API | **Swagger**: a web page listing every endpoint, where you can try them. Log in, click "Authorize", paste the access token. |
 | `x-instance` header | every response | Shows which copy of the app answered (useful once there are several) |
 
 ---
@@ -251,9 +292,11 @@ Asking for someone else's order id → "not found" (we don't even admit it exist
 |---|---|---|
 | Payment | Orders stay `pending_payment` | Phase 4 (payment simulator + saga) |
 | Emails / events | Nothing is sent | Phase 3 (RabbitMQ + outbox) |
-| Cache | Every product read hits MySQL (~1,360/s max per CPU) | Phase 2 (Redis) |
 | Releasing stuck stock | If the app crashes mid-checkout, stock stays reserved | Phase 3–4 (expiry sweeper) |
-| Many app copies, autoscaling | 1 copy | Phase 2 and Kubernetes phase |
+| Deleting old idempotency keys | Kept forever | Phase 3 |
+| Per-IP login limits | Only per-email | needs the real client IP from NGINX |
+| Autoscaling | Copies are added by hand (`API_REPLICAS=4`) | Kubernetes phase |
+| Demo website | Swagger page only | Phase 4.5 |
 | 2FA, microservices, tracing | – | later |
 
 ---
@@ -274,5 +317,10 @@ Asking for someone else's order id → "not found" (we don't even admit it exist
    - Bookmark paging: **1 ms vs 70 ms** for deep pages.
 6. **Say what's next:** cache, events, payments, autoscaling. (§7)
 
-The detailed numbers are in [experiments/E1](experiments/E1-checkout-auth-and-queries.md), and follow-up
-questions with answers are in [interview-notes/phase-1](interview-notes/phase-1-shop-core.md).
+6b. **Phase 2 numbers:** the cache cut MySQL reads by **95–97%**. A burst of 2,000 requests stopped failing once
+   Node's connection queue was raised from 511 to 4,096 (4,322 dropped attempts → 0). Database reads scale by
+   adding *processes*; password hashing scales by adding *cores* to one process.
+
+The detailed numbers are in [experiments/E1](experiments/E1-checkout-auth-and-queries.md) and
+[experiments/E2](experiments/E2-cache-adapters-scaling.md). Follow-up questions with answers are in
+[interview-notes/phase-1](interview-notes/phase-1-shop-core.md) and [interview-notes/phase-2](interview-notes/phase-2-caching-and-scaling.md).

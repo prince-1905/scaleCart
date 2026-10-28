@@ -1,8 +1,10 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import { CacheService } from '../cache/cache.service.js';
+import { ENV, type Env } from '../config/env.js';
 import { isDuplicateKey } from '../database/database.js';
-import type { CreateProductDto, ListProductsQuery } from './catalog.dto.js';
+import type { CreateProductDto, ListProductsQuery, UpdateProductDto } from './catalog.dto.js';
 import { Product } from './product.entity.js';
 import { toBooleanQuery } from './search-query.js';
 
@@ -28,10 +30,34 @@ const toView = (p: Product): ProductView => ({
   priceCents: p.priceCents,
 });
 
+/** Bump when ProductView's shape changes, so old cached JSON is simply never read again. */
+const productKey = (id: number) => `catalog:product:v1:${id}`;
+
 /** The catalog module's public API. Other modules use this, never the products table. */
 @Injectable()
 export class CatalogService {
-  constructor(@InjectRepository(Product, 'catalog') private readonly products: Repository<Product>) {}
+  private readonly ttl: number;
+
+  constructor(
+    @InjectRepository(Product, 'catalog') private readonly products: Repository<Product>,
+    private readonly cache: CacheService,
+    @Inject(ENV) env: Env,
+  ) {
+    this.ttl = env.cacheTtlSeconds;
+  }
+
+  /**
+   * Product page for shoppers: served from Redis when possible.
+   *
+   * Only browsing uses the cache. Checkout and the cart read prices with getById/getByIds
+   * straight from MySQL: a few seconds of staleness is fine on a product page, never on
+   * the amount we charge.
+   */
+  getPublic(id: number): Promise<ProductView | null> {
+    return this.cache.getOrLoad('product', productKey(id), { ttl: this.ttl, missingTtl: 10 }, () =>
+      this.getById(id),
+    );
+  }
 
   /**
    * Keyset pagination: `WHERE id > :after ORDER BY id LIMIT n` jumps straight to the
@@ -87,5 +113,13 @@ export class CatalogService {
       if (isDuplicateKey(err)) throw new ConflictException(`sku ${dto.sku} already exists`);
       throw err;
     }
+  }
+
+  /** Write to MySQL first, then drop the cached copy so the next read loads the new row. */
+  async update(id: number, dto: UpdateProductDto): Promise<ProductView> {
+    const result = await this.products.update({ id }, dto);
+    if (!result.affected) throw new NotFoundException('product not found');
+    await this.cache.invalidate(productKey(id));
+    return (await this.getById(id))!;
   }
 }

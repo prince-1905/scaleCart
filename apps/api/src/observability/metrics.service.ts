@@ -91,6 +91,44 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  // ---- Phase 3: messaging (worker process) ----
+
+  readonly rabbitConnected = new Gauge({
+    name: 'rabbitmq_connected',
+    help: '1 while this process holds a RabbitMQ connection.',
+    registers: [this.registry],
+  });
+
+  readonly outboxPublished = new Counter({
+    name: 'outbox_published_total',
+    help: 'Outbox events published to RabbitMQ (confirmed by the broker).',
+    registers: [this.registry],
+  });
+
+  /** sent, duplicate (already sent: redelivery), retried, dead_lettered, no_recipient. */
+  readonly notifications = new Counter({
+    name: 'notifications_total',
+    help: 'Order-confirmation messages handled by outcome.',
+    labelNames: ['outcome'] as const,
+    registers: [this.registry],
+  });
+
+  /** End to end: order committed → email accepted by the mail server. */
+  readonly notificationDelay = new Histogram({
+    name: 'notification_delay_seconds',
+    help: 'Time from order creation to the confirmation email being sent.',
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300],
+    registers: [this.registry],
+  });
+
+  /** Rows fixed by the worker's cleanup jobs, by job. */
+  readonly cleanup = new Counter({
+    name: 'cleanup_rows_total',
+    help: 'Rows released or deleted by background cleanup jobs.',
+    labelNames: ['job'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

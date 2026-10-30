@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   HttpException,
+  Inject,
   Injectable,
   Logger,
   UnprocessableEntityException,
@@ -12,12 +13,17 @@ import { DataSource } from 'typeorm';
 import { CartService } from '../cart/cart.service.js';
 import { CatalogService } from '../catalog/catalog.service.js';
 import { uuidv7 } from '../common/uuid.js';
+import { ENV, type Env, type NotifyMode } from '../config/env.js';
 import { isDuplicateKey, type WriteResult } from '../database/database.js';
+import { UserDirectory } from '../identity/user-directory.js';
 import { InventoryService, OutOfStockError } from '../inventory/inventory.service.js';
+import { MailerService } from '../notifications/mailer.service.js';
 import { MetricsService } from '../observability/metrics.service.js';
 import type { CheckoutDto } from './checkout.dto.js';
+import { ORDER_CREATED, type OrderCreatedEvent } from './events.js';
 import { IdempotencyKey } from './idempotency-key.entity.js';
 import { Order, OrderItem, type OrderStatus } from './order.entity.js';
+import { OutboxEvent } from './outbox.entity.js';
 
 export interface OrderView {
   id: string;
@@ -54,8 +60,9 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
  *   1. Claim the Idempotency-Key (INSERT; the primary key lets only one request win).
  *   2. Price the cart from the catalog (never trust client prices).
  *   3. Reserve stock in the inventory module (atomic conditional UPDATE).
- *   4. In ONE orders-database transaction: insert the order, its lines, and the
- *      stored response for the key. Either all of it exists or none of it.
+ *   4. In ONE orders-database transaction: insert the order, its lines, the
+ *      "order.created" event (outbox) and the stored response for the key.
+ *      Either all of it exists or none of it.
  *   5. If step 4 fails, release the stock from step 3 (compensation).
  *
  * Steps 3 and 4 touch different modules' databases, so no single transaction can
@@ -66,13 +73,20 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
 export class CheckoutService {
   private readonly logger = new Logger(CheckoutService.name);
 
+  private readonly notifyMode: NotifyMode;
+
   constructor(
     @InjectDataSource('orders') private readonly db: DataSource,
     private readonly cart: CartService,
     private readonly catalog: CatalogService,
     private readonly inventory: InventoryService,
     private readonly metrics: MetricsService,
-  ) {}
+    private readonly users: UserDirectory,
+    private readonly mailer: MailerService,
+    @Inject(ENV) env: Env,
+  ) {
+    this.notifyMode = env.notifyMode;
+  }
 
   async checkout(userId: string, key: string, dto: CheckoutDto): Promise<CheckoutResult> {
     const claim = await this.claim(userId, key, sha256(JSON.stringify(dto)));
@@ -168,6 +182,29 @@ export class CheckoutService {
           OrderItem,
           items.map((i) => ({ orderId, ...i })),
         );
+        if (this.notifyMode === 'outbox') {
+          // Same transaction as the order: the event exists if and only if the order does.
+          const event: OrderCreatedEvent = {
+            schemaVersion: 1,
+            eventId: uuidv7(),
+            occurredAt: order.createdAt,
+            orderId,
+            userId,
+            totalCents,
+            items: items.map(({ productId, name, unitPriceCents, quantity }) => ({
+              productId,
+              name,
+              unitPriceCents,
+              quantity,
+            })),
+          };
+          await m.insert(OutboxEvent, {
+            id: event.eventId,
+            eventType: ORDER_CREATED,
+            aggregateId: orderId,
+            payload: event,
+          });
+        }
         const done = await m.update(
           IdempotencyKey,
           { userId, key, status: 'in_progress' },
@@ -184,6 +221,14 @@ export class CheckoutService {
         );
       }
       throw err;
+    }
+
+    if (this.notifyMode === 'sync') {
+      // LAB ONLY (experiment E3): the "obvious" way. The customer waits for the mail
+      // server, and if it fails, they get an error for an order that WAS created and
+      // will never get its email: two systems written without a shared transaction.
+      const to = await this.users.getEmail(userId);
+      if (to) await this.mailer.sendOrderConfirmation({ to, orderId, totalCents, items });
     }
     return order;
   }

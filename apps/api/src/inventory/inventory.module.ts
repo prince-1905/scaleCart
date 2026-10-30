@@ -1,14 +1,11 @@
 import { Module } from '@nestjs/common';
 import { CatalogModule } from '../catalog/catalog.module.js';
-import { moduleTypeOrm } from '../database/module-typeorm.js';
+import { InventoryCoreModule } from './inventory-core.module.js';
 import { InventoryController } from './inventory.controller.js';
-import { inventoryDatabase } from './inventory.database.js';
-import { InventoryService } from './inventory.service.js';
 
 @Module({
-  imports: [...moduleTypeOrm(inventoryDatabase), CatalogModule],
+  imports: [InventoryCoreModule, CatalogModule],
   controllers: [InventoryController],
-  providers: [InventoryService],
-  exports: [InventoryService],
+  exports: [InventoryCoreModule],
 })
 export class InventoryModule {}

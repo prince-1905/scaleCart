@@ -14,8 +14,8 @@ Kubernetes · Prometheus · Grafana · k6
 | 0 | Measurement harness, event-loop experiments | ✅ done |
 | 1 | Shop core: auth, catalog, cart, checkout (modular monolith) | ✅ done |
 | 2 | Redis cache, login limits, Swagger, runtime experiments (Fastify vs Express, scaling) | ✅ done |
-| 3 | RabbitMQ, transactional outbox, notification worker | next |
-| 4 | Payment simulator, idempotency, saga | |
+| 3 | RabbitMQ, transactional outbox, notification worker, cleanup jobs | ✅ done |
+| 4 | Payment simulator, idempotency, saga | next |
 | 7-light | Kubernetes (kind), HPA, connection pooling | |
 | later | 2FA · microservice split · tracing · cloud capacity tests · polish | |
 
@@ -34,6 +34,11 @@ Kubernetes · Prometheus · Grafana · k6
   Redis cache-aside: **1.6–2.1× throughput, 95–97% fewer MySQL reads** on popular products. Fastify vs Express:
   **+40%** empty endpoint, **+25%** real one. DB reads scale **out** (2×1 CPU: 1.8×) but logins scale **up**
   (1×4 CPUs: 4.7× vs 4×1 CPU: 3.0–3.7×, explained by CPU throttling).
+- [E3 — outbox + RabbitMQ vs email in the request, failure tests](docs/experiments/E3-outbox-queue-failures.md):
+  a 30 s mail-server freeze with the email sent inside checkout gave **60 customers an error for orders that existed**
+  (47 never emailed). Outbox + RabbitMQ: **0 errors, 0 lost, 0 duplicate emails** across a frozen mail server, a killed
+  worker and a restarted broker (9,480 orders). Found multi-second checkout stalls caused by slow disk fsyncs under a hot
+  row lock (not by the new code).
 
 How the whole app works, step by step (no code): [docs/scalecart-workflow.md](docs/scalecart-workflow.md)
 Interview notes per phase: [docs/interview-notes/](docs/interview-notes/)
@@ -44,7 +49,7 @@ Requires Docker Desktop, Node 24, and k6.
 
 ```powershell
 Copy-Item .env.example .env           # then put your own passwords/secrets in .env (never committed)
-docker compose up -d --build          # mysql, redis, migrate job, api, nginx, prometheus, grafana
+docker compose up -d --build          # mysql, redis, rabbitmq, mailpit, migrate job, api, worker, nginx, prometheus, grafana
 # demo + load-test data: admin@scalecart.local (password = ADMIN_PASSWORD in .env),
 # loadtest+1..2000@scalecart.local (password = SEED_USER_PASSWORD in .env)
 docker compose run --rm -e SEED_PRODUCTS=200000 -e SEED_USERS=2000 migrate node dist/seed.js
@@ -56,6 +61,8 @@ curl http://localhost:8088/products?q=leather%20boot
 | http://localhost:8088 | API via NGINX load balancer |
 | http://localhost:3001 | Grafana dashboard ("ScaleCart - Overview") |
 | http://localhost:9090 | Prometheus |
+| http://localhost:8025 | Mailpit: every email the shop sends (fake inbox) |
+| http://localhost:15672 | RabbitMQ management UI (user `scalecart`, password `RABBITMQ_PASSWORD` from .env) |
 | localhost:6379 | Redis (cache + login-failure counters; optional, the API works without it) |
 | localhost:3307 | MySQL (user `scalecart`, password `DB_PASSWORD` from .env; one database per module: `scalecart_identity`, `_catalog`, `_inventory`, `_cart`, `_orders`) |
 
@@ -80,7 +87,8 @@ click **Authorize**, paste the `accessToken`.
 ```powershell
 cd apps/api
 npm test              # unit tests
-npm run test:e2e      # needs `docker compose up -d mysql redis`; uses scalecart_test_* databases + Redis db 1
+npm run test:e2e      # needs `docker compose up -d mysql redis rabbitmq mailpit`; uses scalecart_test_* databases,
+                      # Redis db 1 and `test.`-prefixed RabbitMQ queues
 ```
 
 ### Experiments
@@ -96,13 +104,14 @@ $env:STOCK_RESERVATION='naive'; docker compose up -d --wait api; docker compose 
 cd apps/api; node scripts/e1-queries.ts                             # search + pagination inside MySQL
 ```
 
-Useful knobs: `API_REPLICAS`, `API_CPUS`, `HTTP_ADAPTER=fastify|express`, `CACHE_ENABLED`, `HTTP_LISTEN_BACKLOG`,
+Useful knobs: `API_REPLICAS`, `API_CPUS`, `WORKER_REPLICAS`, `NOTIFY_MODE=outbox|sync`, `HTTP_ADAPTER=fastify|express`, `CACHE_ENABLED`, `HTTP_LISTEN_BACKLOG`,
 `STOCK_RESERVATION=atomic|locking|naive`, `DB_POOL_SIZE`, `LB_PORT` (default 8088). After recreating the API container, restart `lb` so NGINX re-resolves it.
 
 ## Layout
 
 ```
-apps/api/            NestJS application: one folder per module (identity, catalog, inventory, cart, orders)
+apps/api/            NestJS app: one folder per module (identity, catalog, inventory, cart, orders, notifications);
+                     dist/main.js = API, dist/worker.js = background worker (same image)
 infra/               mysql init, nginx, prometheus, grafana (dashboards provisioned automatically)
 load-tests/          k6 scripts, runner, report generator
 docs/experiments/    experiment write-ups with real numbers

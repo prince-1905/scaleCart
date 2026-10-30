@@ -67,6 +67,22 @@ if (named.length) {
   }
 }
 
+// Latency of one request name within each step (thresholds like http_req_duration{scenario:X,name:Y}).
+const perStep = Object.keys(metrics)
+  .map((k) => k.match(/^http_req_duration\{scenario:([^,}]+),name:([^}]+)\}$/))
+  .filter(Boolean);
+if (perStep.length) {
+  console.log('\n| step | request | p50 ms | p95 ms | p99 ms | max ms | errors |');
+  console.log('|---|---|---|---|---|---|---|');
+  perStep.sort((a, b) => (targetRate(a[1]) ?? 0) - (targetRate(b[1]) ?? 0));
+  for (const [key, s, n] of perStep) {
+    const dur = metrics[key];
+    const failed = metrics[`http_req_failed{scenario:${s},name:${n}}`];
+    const errors = failed ? `${(failed.value * 100).toFixed(2)}%` : '-';
+    console.log(`| ${s} | ${n} | ${ms(dur.med)} | ${ms(dur['p(95)'])} | ${ms(dur['p(99)'])} | ${ms(dur.max)} | ${errors} |`);
+  }
+}
+
 // Custom counters defined by the script (k6's built-in metrics are skipped).
 const BUILTIN = new Set(['http_reqs', 'iterations', 'data_sent', 'data_received', 'dropped_iterations']);
 const counters = Object.entries(metrics).filter(

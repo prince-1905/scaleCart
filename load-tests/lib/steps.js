@@ -72,8 +72,9 @@ export function merge(...parts) {
   );
 }
 
+/** "500,1000" or "500;1000" (run.ps1's -K6Env splits on commas, so lists inside it use ";"). */
 export function rates(envValue, fallback) {
-  return (envValue || fallback).split(',').map(Number);
+  return (envValue || fallback).split(/[,;]/).map(Number);
 }
 
 export const BASE_URL = __ENV.BASE_URL || 'http://localhost:8088';

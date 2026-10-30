@@ -7,7 +7,7 @@ import type { DbConfig } from '../config/env.js';
  * Splitting a module into its own service later means pointing its DataSource at
  * another server, not untangling joins across modules.
  */
-export type ModuleName = 'identity' | 'catalog' | 'inventory' | 'cart' | 'orders';
+export type ModuleName = 'identity' | 'catalog' | 'inventory' | 'cart' | 'orders' | 'notifications';
 
 export interface ModuleDatabase {
   module: ModuleName;

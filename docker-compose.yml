@@ -2,6 +2,7 @@
 #   docker compose up -d --build                     start everything
 #   API_REPLICAS=4 docker compose up -d --build      run 4 API instances behind NGINX
 #   docker compose run --rm migrate node dist/seed.js   demo data (see apps/api/src/seed.ts)
+#   UIs: Swagger :8088/docs · Grafana :3001 · RabbitMQ :15672 · Mailpit (emails) :8025
 #   docker compose down -v                           stop and delete all data
 name: scalecart
 
@@ -69,6 +70,82 @@ services:
       timeout: 3s
       retries: 10
 
+  # Message broker. Management UI: http://localhost:15672 (user scalecart, RABBITMQ_PASSWORD).
+  rabbitmq:
+    image: rabbitmq:4.3.7-management-alpine
+    hostname: rabbitmq   # RabbitMQ stores data per node name; a fixed hostname keeps it across restarts
+    environment:
+      RABBITMQ_DEFAULT_USER: scalecart
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env (see .env.example)}
+    ports:
+      - "5672:5672"     # AMQP (apps)
+      - "15672:15672"   # management UI
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  # Fake mail server: catches every email. Inbox UI: http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:v1.31.4
+    environment:
+      MP_MAX_MESSAGES: 0          # keep everything (default deletes beyond 500), so experiments can count
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "1025:1025"     # SMTP
+      - "8025:8025"     # web inbox + API
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+  # Background process: outbox relay → RabbitMQ, email consumer, cleanup jobs.
+  # Same image as the API, different entry point; no JWT secret, no public port.
+  worker:
+    build: ./apps/api
+    image: scalecart/api:dev
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *db-env
+      PORT: 3001
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HTTP_ACCESS_LOG: "false"
+      RABBITMQ_URL: amqp://scalecart:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-60}
+      NODE_OPTIONS: --max-old-space-size=192
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      # Started, not healthy: the worker waits and reconnects by itself.
+      rabbitmq:
+        condition: service_started
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "${WORKER_CPUS:-1.0}"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
   # One-off job: creates the module databases and applies migrations, then exits.
   migrate:
     build: ./apps/api
@@ -103,6 +180,10 @@ services:
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
       # Node's default is 511; bursts overflowed it (E2). Capped by net.core.somaxconn (4096).
       HTTP_LISTEN_BACKLOG: ${HTTP_LISTEN_BACKLOG:-4096}
+      # outbox (normal) | sync (lab: email sent inside the checkout request, experiment E3)
+      NOTIFY_MODE: ${NOTIFY_MODE:-outbox}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:
@@ -173,5 +254,6 @@ services:
 
 volumes:
   mysql-data:
+  rabbitmq-data:
   prometheus-data:
   grafana-data:

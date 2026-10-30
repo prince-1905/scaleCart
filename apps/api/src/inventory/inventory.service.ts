@@ -72,6 +72,20 @@ export class InventoryService {
     );
   }
 
+  /**
+   * Orders that have held stock for longer than `olderThanSeconds`. The caller decides
+   * which of them are orphans (no order was ever saved) and releases those.
+   */
+  async staleReservationOrderIds(olderThanSeconds: number, limit = 500): Promise<string[]> {
+    const rows: { orderId: string }[] = await this.db.query(
+      `SELECT DISTINCT order_id AS orderId FROM reservations
+        WHERE status = 'reserved' AND created_at < NOW(3) - INTERVAL ? SECOND
+        LIMIT ?`,
+      [olderThanSeconds, limit],
+    );
+    return rows.map((r) => r.orderId);
+  }
+
   /** Gives an order's stock back (compensation when checkout fails later). Safe to repeat. */
   async release(orderId: string): Promise<void> {
     await retryOnDeadlock(() =>

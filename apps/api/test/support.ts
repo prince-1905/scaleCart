@@ -6,8 +6,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
+import { NestFactory } from '@nestjs/core';
+import { FastifyAdapter } from '@nestjs/platform-fastify';
 import { createApp, listen } from '../src/app.factory.js';
 import { RedisService } from '../src/cache/redis.service.js';
+import { RabbitService } from '../src/messaging/rabbit.service.js';
+import { WorkerModule } from '../src/worker/worker.module.js';
 import { loadEnv, type HttpAdapterName } from '../src/config/env.js';
 import type { ModuleName } from '../src/database/database.js';
 
@@ -30,6 +34,11 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   DB_PREFIX: 'scalecart_test_',
   // Redis database 1, so tests never touch the app's cache (database 0).
   REDIS_URL: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1',
+  // Own exchange and queues ("test." prefix), so the dev stack's worker never takes test messages.
+  RABBITMQ_URL: `amqp://scalecart:${process.env.RABBITMQ_PASSWORD ?? ''}@127.0.0.1:5672`,
+  MQ_PREFIX: 'test.',
+  SMTP_HOST: '127.0.0.1',
+  SMTP_PORT: '1025',
   // Signs tokens for throwaway test apps only; never used by a real deployment.
   JWT_SECRET: 'test-only-secret-0123456789abcdefghijklmnop',
   HTTP_ACCESS_LOG: 'false',
@@ -47,6 +56,33 @@ export async function startApp(
   await listen(app, { ...env, port: 0 }, '127.0.0.1');
   await waitForRedis(app);
   return app;
+}
+
+/** The background worker (outbox relay, email consumer, cleanup), connected to RabbitMQ. */
+export async function startWorker(overrides: NodeJS.ProcessEnv = {}): Promise<INestApplication> {
+  const env = loadEnv({ ...TEST_ENV, CLEANUP_INTERVAL_SECONDS: '3600', ...overrides }, 'worker');
+  const app = await NestFactory.create(WorkerModule.forRoot(env), new FastifyAdapter(), { logger: false });
+  await app.listen(0, '127.0.0.1');
+  const rabbit = app.get(RabbitService);
+  for (let i = 0; i < 250 && !rabbit.isReady; i++) await sleep(20);
+  if (!rabbit.isReady) throw new Error('worker could not connect to RabbitMQ (docker compose up -d rabbitmq?)');
+  return app;
+}
+
+/** Emails in Mailpit whose subject contains `text`. */
+export async function mailpitCount(text: string): Promise<number> {
+  const res = await fetch(`http://127.0.0.1:8025/api/v1/search?query=${encodeURIComponent(`subject:"${text}"`)}`);
+  const body = (await res.json()) as { messages_count: number };
+  return body.messages_count;
+}
+
+/** Polls until `check` is true (or fails after `timeoutMs`). */
+export async function eventually(check: () => Promise<boolean>, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error('condition not met in time');
+    await sleep(100);
+  }
 }
 
 /** Redis connects in the background (the app never waits for it); tests do. */

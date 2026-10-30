@@ -3,7 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { HealthCheck, HealthCheckService, TypeOrmHealthIndicator } from '@nestjs/terminus';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import { Public } from '../common/auth.js';
-import { MODULE_DATABASES } from '../database/modules.js';
+import { API_DATABASES } from '../database/modules.js';
 
 /**
  * Two separate probes, on purpose:
@@ -32,7 +32,7 @@ export class HealthController {
   @HealthCheck()
   ready() {
     return this.health.check(
-      MODULE_DATABASES.map(({ module }) => () => {
+      API_DATABASES.map((module) => () => {
         const connection = this.moduleRef.get(getDataSourceToken(module), { strict: false });
         return this.db.pingCheck(`db_${module}`, { connection, timeout: 1_000 });
       }),

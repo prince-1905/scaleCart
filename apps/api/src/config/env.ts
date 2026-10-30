@@ -15,6 +15,17 @@ export type HttpAdapterName = 'fastify' | 'express';
  */
 export type StockReservationStrategy = 'atomic' | 'locking' | 'naive';
 
+/**
+ * How the order-confirmation email is sent.
+ *   outbox  checkout writes an event row in the same transaction; a worker publishes it
+ *           to RabbitMQ and another sends the email (the API never waits for email)
+ *   sync    checkout sends the email itself before answering (lab only, for experiment E3)
+ */
+export type NotifyMode = 'outbox' | 'sync';
+
+/** api = the HTTP server; worker = background process (outbox relay, consumers, cleanup jobs). */
+export type ProcessRole = 'api' | 'worker';
+
 export interface DbConfig {
   host: string;
   port: number;
@@ -55,6 +66,16 @@ export interface Env {
   loginFailureWindowSeconds: number;
   /** Serves the Swagger UI at /docs and the OpenAPI document at /docs-json. */
   apiDocs: boolean;
+  role: ProcessRole;
+  notifyMode: NotifyMode;
+  rabbitmqUrl: string;
+  /** Prefix for exchange and queue names, so e2e tests never share queues with the dev stack. */
+  mqPrefix: string;
+  smtpHost: string;
+  smtpPort: number;
+  mailFrom: string;
+  /** How often the worker's cleanup jobs run. */
+  cleanupIntervalSeconds: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -83,8 +104,11 @@ export function loadDbConfig(source: NodeJS.ProcessEnv = process.env): DbConfig 
   };
 }
 
-export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  const port = positiveInt(source, 'PORT', 3000);
+export function loadEnv(
+  source: NodeJS.ProcessEnv = process.env,
+  role: ProcessRole = 'api',
+): Env {
+  const port = positiveInt(source, 'PORT', role === 'api' ? 3000 : 3001);
 
   const httpAdapter = (source.HTTP_ADAPTER ?? 'fastify').toLowerCase();
   if (httpAdapter !== 'fastify' && httpAdapter !== 'express') {
@@ -92,12 +116,20 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   }
 
   // No default: a guessable signing key would let anyone mint access tokens.
+  // The worker never signs or checks tokens, so it doesn't get the secret at all.
   const jwtSecret = source.JWT_SECRET ?? '';
-  if (jwtSecret.length < 32) {
+  if (role === 'api' && jwtSecret.length < 32) {
     throw new Error('JWT_SECRET must be set and at least 32 characters long');
   }
 
   const labEndpoints = bool(source.LAB_ENDPOINTS, false);
+  const notifyMode = (source.NOTIFY_MODE ?? 'outbox').toLowerCase();
+  if (notifyMode !== 'outbox' && notifyMode !== 'sync') {
+    throw new Error(`Invalid NOTIFY_MODE: ${source.NOTIFY_MODE} (expected outbox|sync)`);
+  }
+  if (notifyMode === 'sync' && !labEndpoints) {
+    throw new Error('NOTIFY_MODE=sync is only allowed with LAB_ENDPOINTS=true');
+  }
   const stockReservation = (source.STOCK_RESERVATION ?? 'atomic').toLowerCase();
   if (stockReservation !== 'atomic' && stockReservation !== 'locking' && stockReservation !== 'naive') {
     throw new Error(
@@ -114,7 +146,7 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     logLevel: source.LOG_LEVEL ?? 'info',
     httpAccessLog: bool(source.HTTP_ACCESS_LOG, true),
     labEndpoints,
-    serviceName: source.SERVICE_NAME ?? 'scalecart-api',
+    serviceName: source.SERVICE_NAME ?? `scalecart-${role}`,
     db: loadDbConfig(source),
     jwtSecret,
     accessTokenTtlSeconds: positiveInt(source, 'ACCESS_TOKEN_TTL_SECONDS', 900),
@@ -127,6 +159,14 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     loginMaxFailures: positiveInt(source, 'LOGIN_MAX_FAILURES', 5),
     loginFailureWindowSeconds: positiveInt(source, 'LOGIN_FAILURE_WINDOW_SECONDS', 900),
     apiDocs: bool(source.API_DOCS, true),
+    role,
+    notifyMode,
+    rabbitmqUrl: source.RABBITMQ_URL ?? 'amqp://scalecart:scalecart@127.0.0.1:5672',
+    mqPrefix: source.MQ_PREFIX ?? '',
+    smtpHost: source.SMTP_HOST ?? '127.0.0.1',
+    smtpPort: positiveInt(source, 'SMTP_PORT', 1025),
+    mailFrom: source.MAIL_FROM ?? 'ScaleCart <orders@scalecart.local>',
+    cleanupIntervalSeconds: positiveInt(source, 'CLEANUP_INTERVAL_SECONDS', 60),
   };
 }
 

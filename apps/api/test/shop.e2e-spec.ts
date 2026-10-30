@@ -62,23 +62,23 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('shop on %s', (adapter) =
     });
 
     it('pages through products with a keyset cursor', async () => {
+      // A word only these products have: other test files create products in parallel.
+      const word = `pg${randomUUID().replace(/-/g, '').slice(0, 10)}`;
       const ids = [
-        await createProduct(app, admin),
-        await createProduct(app, admin),
-        await createProduct(app, admin),
+        await createProduct(app, admin, { name: `${word} one` }),
+        await createProduct(app, admin, { name: `${word} two` }),
+        await createProduct(app, admin, { name: `${word} three` }),
       ];
-      const page1 = await http(app)
-        .get('/products')
-        .query({ after: ids[0] - 1, limit: 2 })
-        .expect(200);
+      const page1 = await http(app).get('/products').query({ q: word, limit: 2 }).expect(200);
       expect(page1.body.items.map((p: { id: number }) => p.id)).toEqual(ids.slice(0, 2));
       expect(page1.body.nextAfter).toBe(ids[1]);
 
       const page2 = await http(app)
         .get('/products')
-        .query({ after: page1.body.nextAfter, limit: 2 })
+        .query({ q: word, after: page1.body.nextAfter, limit: 2 })
         .expect(200);
-      expect(page2.body.items[0].id).toBe(ids[2]);
+      expect(page2.body.items.map((p: { id: number }) => p.id)).toEqual([ids[2]]);
+      expect(page2.body.nextAfter).toBeNull();
     });
 
     it('validates query parameters', async () => {

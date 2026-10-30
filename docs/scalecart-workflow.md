@@ -37,12 +37,20 @@ an interviewer through any request from start to finish.
                         └─────────────────────────┘
         ▼            ▼           ▼           ▼        ▼
    ┌──────────────────────────────────────────────────────────────┐
-   │  MySQL server, with 5 separate databases (one per module)     │
-   │  identity · catalog · inventory · cart · orders               │
+   │  MySQL server, with 6 separate databases (one per module)     │
+   │  identity · catalog · inventory · cart · orders · notifications│
    │  = the SOURCE OF TRUTH: anything important lives here         │
-   └──────────────────────────────────────────────────────────────┘
+   └───────────────────────────────┬──────────────────────────────┘
+                                   │ "outbox": notes saved with each order
+                                   ▼
+   ┌──────────────────┐     ┌──────────────┐     ┌──────────────────┐
+   │ WORKER           │ ──► │ RabbitMQ     │ ──► │ WORKER           │ ──► Mailpit
+   │ (relay: outbox → │     │ (message     │     │ (email sender)   │     (fake inbox)
+   │  RabbitMQ)       │     │  queue)      │     │                  │
+   └──────────────────┘     └──────────────┘     └──────────────────┘
+     Same code as the API, separate program: does the slow work in the background.
 
-   Prometheus ── every 5 s asks the API "how are you doing?" (/metrics) and stores the numbers
+   Prometheus ── every 5 s asks the API, the worker and RabbitMQ "how are you doing?"
    Grafana    ── draws those numbers as live charts
 ```
 
@@ -52,6 +60,9 @@ an interviewer through any request from start to finish.
 | **API** | The actual shop logic. Node.js + NestJS framework + Fastify (fast web server). | Docker, limited to 1 CPU |
 | **MySQL** | Where everything is stored permanently. | Docker, port 3307 |
 | **Redis** | Super-fast memory store. Holds *copies* (cache) and counters, never anything we can't lose. | Docker, port 6379 |
+| **Worker** | Background program: moves outbox notes to RabbitMQ, sends emails, runs cleanup jobs. Never talks to customers. | Docker, no public port |
+| **RabbitMQ** | Message queue: a safe "order rail" that holds jobs until a worker takes them. | Docker, UI at port 15672 |
+| **Mailpit** | Fake email server: catches every email so you can read it in the browser. | Docker, inbox at port 8025 |
 | **migrate job** | Runs once at startup to create the databases and tables, then exits. | Docker |
 | **Prometheus** | Collects performance numbers (speed, errors, CPU). | Docker, port 9090 |
 | **Grafana** | Dashboard showing those numbers as charts. | Docker, port 3001 |
@@ -64,12 +75,14 @@ Everything starts with one command: `docker compose up -d`.
 ## 3. What happens when you start the app
 
 ```
-1. MySQL + Redis start     → MySQL creates the app's database user
-2. migrate job runs        → creates 5 databases + their tables, then stops
+1. MySQL, Redis, RabbitMQ, Mailpit start
+2. migrate job runs        → creates 6 databases + their tables, then stops
 3. API starts              → opens connections to its 5 databases (5 connections each),
                               connects to Redis in the background (doesn't wait for it)
+   Worker starts           → connects to RabbitMQ (keeps retrying until it can), creates
+                              the queues, starts moving outbox notes and sending emails
 4. NGINX starts            → begins accepting customer requests on port 8088
-5. Prometheus + Grafana    → start watching the API
+5. Prometheus + Grafana    → start watching the API, the worker and RabbitMQ
 (6. seed script, run by hand → fills in demo data: 200,000 products, 2,000 test users, 1 admin)
 ```
 
@@ -78,9 +91,9 @@ would trip over each other. One job does it first, and the app waits for it.
 
 ---
 
-## 4. The 5 modules: who owns what data
+## 4. The 6 modules: who owns what data
 
-Picture 5 departments in a shop. Each has **its own notebook**, and nobody writes in another
+Picture 6 departments in a shop. Each has **its own notebook**, and nobody writes in another
 department's notebook. If one department needs something, it **asks** the other department.
 
 | Module | Its job | What it stores (tables) |
@@ -89,7 +102,16 @@ department's notebook. If one department needs something, it **asks** the other 
 | **catalog** | Products and search | `products`: name, description, price **in cents**, SKU, plus a **search index** on name + description |
 | **inventory** | How many items are left | `stock`: product → units available · `reservations`: "order X took 2 of product Y" (reserved / released) |
 | **cart** | Each user's cart | `cart_items`: user, product, quantity (max 10 each, max 50 different products) |
-| **orders** | Checkout and order history | `orders`: who, total, status · `order_items`: **copy** of name + price at the time of purchase · `idempotency_keys`: remembers each checkout attempt and its answer |
+| **orders** | Checkout and order history | `orders`: who, total, status · `order_items`: **copy** of name + price at the time of purchase · `idempotency_keys`: remembers each checkout attempt and its answer · `outbox`: "order.created" notes waiting to be sent to RabbitMQ |
+| **notifications** | Confirmation emails (runs in the worker) | `sent_notifications`: which order events already got their email, so a repeat is skipped |
+
+**What lives in RabbitMQ** (jobs in transit, stored on disk):
+
+| Queue | What waits there |
+|---|---|
+| `notifications.order-created` | "send the confirmation email for order X" jobs |
+| `….retry` | jobs that just failed: they wait 5 s, then go back to the main queue |
+| `….dlq` ("dead letter queue") | jobs that failed 12 times (or are unreadable), parked for a human |
 
 **What lives in Redis** (copies and counters only; losing Redis loses nothing important):
 
@@ -244,7 +266,8 @@ per "Buy" press and reuses if it has to retry.
     Write down "order X took these items" (reservations).
 
  5. CREATE THE ORDER  (one transaction = all or nothing) orders.orders + order_items
-    Save order (status "pending_payment") + items        + idempotency_keys
+    Save order (status "pending_payment") + items        + outbox + idempotency_keys
+    + an "order.created" note in the outbox (for the email, see §5H)
     + mark the key "completed" with the answer.
 
  6. If step 5 fails → UNDO step 4: give the stock back   inventory (compensation)
@@ -272,6 +295,51 @@ GET /orders → orders module returns only YOUR orders, newest first, with a boo
 Asking for someone else's order id → "not found" (we don't even admit it exists).
 ```
 
+### H. After "Buy": the confirmation email (in the background)
+
+The customer already has their 201 answer. Everything below happens without them waiting:
+
+```
+ 1. OUTBOX     checkout saved an "order.created" note in the SAME transaction as the order
+               → order exists  ⇔  note exists. Never one without the other.
+ 2. RELAY      the worker checks the outbox every 0.2 s, takes up to 100 unsent notes
+               (FOR UPDATE SKIP LOCKED: several workers can share the work without
+               fighting over the same rows), sends them to RabbitMQ, waits until RabbitMQ
+               confirms "stored", then marks them sent.
+ 3. QUEUE      RabbitMQ keeps the job safely on disk until a consumer takes it.
+ 4. CONSUMER   the worker takes up to 20 jobs at a time ("prefetch"). For each:
+                 already in sent_notifications?  → skip (it's a repeat)
+                 look up the customer's email (asks the identity module)
+                 send the email via SMTP → Mailpit
+                 remember the event id in sent_notifications
+                 tell RabbitMQ "done" (ack). Only now is the job removed.
+ 5. FAILURE    mail server down? → job goes to the retry queue, comes back 5 s later.
+               Failed 12 times (~1 min)? → parked in the dead-letter queue for a human.
+```
+
+**Why not just send the email inside checkout?** Two reasons:
+- **The customer waits** for the mail server on every order.
+- **Two systems, no shared transaction.** If the order saves and then the mail server fails, the customer sees
+  an *error* for an order that *was* created, and the email is never sent. This is the "dual write problem".
+
+**Why can a job arrive twice?** If the worker crashes after RabbitMQ stored a message but before marking
+the note "sent", the note is sent again. That's called **at-least-once** delivery. It's fine because the consumer
+skips event ids it has already handled (an **idempotent consumer**). Analogy: the postman may ring twice,
+but you only sign once.
+
+**Why does the API not talk to RabbitMQ at all?** So that RabbitMQ being down can never fail a checkout.
+The API only writes to MySQL; the worker deals with RabbitMQ.
+
+### I. Cleanup jobs (worker, every 60 s)
+
+| Job | Why |
+|---|---|
+| Release **orphan stock reservations** older than 10 min whose order doesn't exist | If the API crashed between "take stock" and "save order", that stock was stuck forever (the Phase 1 gap) |
+| Delete **idempotency keys** older than 24 h | Nobody retries yesterday's click; the table would grow forever |
+| Delete **sent outbox notes** older than 7 days | Kept only for debugging |
+
+Every job is safe to run twice at the same time, so several workers need no coordination.
+
 ---
 
 ## 6. How we watch it (observability)
@@ -282,6 +350,9 @@ Asking for someone else's order id → "not found" (we don't even admit it exist
 | `/health/ready` | API | "Can it serve customers?" Pings all 5 databases. |
 | `/metrics` | API → Prometheus → Grafana | Requests per second, response times (p50/p95/p99), errors, CPU, event-loop busy %, login hashing time, checkout outcomes (created / sold out / replayed), cache hits/misses, Redis errors |
 | `/docs` | API | **Swagger**: a web page listing every endpoint, where you can try them. Log in, click "Authorize", paste the access token. |
+| worker `/metrics` | worker → Prometheus | Outbox backlog (notes not yet sent), emails sent / retried / dead-lettered / duplicates skipped, **order → email delay**, RabbitMQ connected |
+| RabbitMQ UI | http://localhost:15672 | Queues, how many jobs wait in each, message rates (user `scalecart`, password from `.env`) |
+| Mailpit | http://localhost:8025 | Every confirmation email the shop sent |
 | `x-instance` header | every response | Shows which copy of the app answered (useful once there are several) |
 
 ---
@@ -290,10 +361,8 @@ Asking for someone else's order id → "not found" (we don't even admit it exist
 
 | Not yet | Today | Coming in |
 |---|---|---|
-| Payment | Orders stay `pending_payment` | Phase 4 (payment simulator + saga) |
-| Emails / events | Nothing is sent | Phase 3 (RabbitMQ + outbox) |
-| Releasing stuck stock | If the app crashes mid-checkout, stock stays reserved | Phase 3–4 (expiry sweeper) |
-| Deleting old idempotency keys | Kept forever | Phase 3 |
+| Payment | Orders stay `pending_payment` forever, and their stock stays reserved | Phase 4 (payment simulator + saga, payment timeout releases stock) |
+| Waiting room for drops | Bursts queue inside the app (p99 up to 27 s in E2) | later (admission control / load shedding) |
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Autoscaling | Copies are added by hand (`API_REPLICAS=4`) | Kubernetes phase |
 | Demo website | Swagger page only | Phase 4.5 |
@@ -321,6 +390,12 @@ Asking for someone else's order id → "not found" (we don't even admit it exist
    Node's connection queue was raised from 511 to 4,096 (4,322 dropped attempts → 0). Database reads scale by
    adding *processes*; password hashing scales by adding *cores* to one process.
 
-The detailed numbers are in [experiments/E1](experiments/E1-checkout-auth-and-queries.md) and
-[experiments/E2](experiments/E2-cache-adapters-scaling.md). Follow-up questions with answers are in
-[interview-notes/phase-1](interview-notes/phase-1-shop-core.md) and [interview-notes/phase-2](interview-notes/phase-2-caching-and-scaling.md).
+6c. **Phase 3 numbers:** with the email sent *inside* checkout, a 30 s mail-server freeze gave **60 customers an
+   error for orders that existed** (47 never emailed). With the outbox: **0 errors, 0 lost, 0 duplicate emails**
+   across a frozen mail server, a killed worker and a restarted RabbitMQ (9,480 orders).
+
+The detailed numbers are in [experiments/E1](experiments/E1-checkout-auth-and-queries.md),
+[experiments/E2](experiments/E2-cache-adapters-scaling.md) and [experiments/E3](experiments/E3-outbox-queue-failures.md).
+Follow-up questions with answers are in [interview-notes/phase-1](interview-notes/phase-1-shop-core.md),
+[interview-notes/phase-2](interview-notes/phase-2-caching-and-scaling.md) and
+[interview-notes/phase-3](interview-notes/phase-3-messaging-and-outbox.md).

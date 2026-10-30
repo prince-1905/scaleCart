@@ -30,7 +30,25 @@ describe('loadEnv', () => {
       loginMaxFailures: 5,
       loginFailureWindowSeconds: 900,
       apiDocs: true,
+      role: 'api',
+      notifyMode: 'outbox',
+      rabbitmqUrl: 'amqp://scalecart:scalecart@127.0.0.1:5672',
+      mqPrefix: '',
+      smtpHost: '127.0.0.1',
+      smtpPort: 1025,
+      mailFrom: 'ScaleCart <orders@scalecart.local>',
+      cleanupIntervalSeconds: 60,
     });
+  });
+
+  it('lets the worker run without the API’s token secret', () => {
+    expect(() => loadEnv({}, 'worker')).not.toThrow();
+    expect(loadEnv({}, 'worker')).toMatchObject({ role: 'worker', port: 3001, serviceName: 'scalecart-worker' });
+  });
+
+  it('only allows synchronous email in lab mode', () => {
+    expect(() => loadEnv({ JWT_SECRET: SECRET, NOTIFY_MODE: 'sync' })).toThrow(/LAB_ENDPOINTS/);
+    expect(loadEnv({ JWT_SECRET: SECRET, NOTIFY_MODE: 'sync', LAB_ENDPOINTS: 'true' }).notifyMode).toBe('sync');
   });
 
   it('parses overrides', () => {

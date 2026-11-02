@@ -184,6 +184,11 @@ services:
       NOTIFY_MODE: ${NOTIFY_MODE:-outbox}
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
+      # AI shopping assistant (Phase 3.5). Empty key = assistant off (/ai routes answer 503).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gemini-3.6-flash}
+      AI_THINKING_LEVEL: ${AI_THINKING_LEVEL:-minimal}
+      AI_CHAT_PER_MINUTE: ${AI_CHAT_PER_MINUTE:-10}
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:
@@ -213,6 +218,7 @@ services:
       - "${LB_PORT:-8088}:80"
     volumes:
       - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./apps/demo:/usr/share/nginx/demo:ro
     depends_on:
       api:
         condition: service_healthy

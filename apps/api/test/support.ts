@@ -8,6 +8,10 @@ import request from 'supertest';
 import type { DataSource } from 'typeorm';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
+import { Test } from '@nestjs/testing';
+import type { LlmClient } from '../src/ai/llm-client.js';
+import { LLM_CLIENT } from '../src/ai/shopping-assistant.js';
+import { AppModule } from '../src/app.module.js';
 import { createApp, listen } from '../src/app.factory.js';
 import { RedisService } from '../src/cache/redis.service.js';
 import { RabbitService } from '../src/messaging/rabbit.service.js';
@@ -19,7 +23,9 @@ import type { ModuleName } from '../src/database/database.js';
 const DOT_ENV = fileURLToPath(new URL('../../../.env', import.meta.url));
 if (existsSync(DOT_ENV)) process.loadEnvFile(DOT_ENV);
 if (!process.env.DB_PASSWORD) {
-  throw new Error('e2e tests need DB_PASSWORD: copy .env.example to .env at the repo root');
+  throw new Error(
+    'e2e tests need DB_PASSWORD: copy .env.example to .env at the repo root',
+  );
 }
 
 /**
@@ -58,26 +64,62 @@ export async function startApp(
   return app;
 }
 
+/**
+ * The API with the AI model replaced by `llm` (a scripted fake): everything else is real
+ * (HTTP, auth, validation, tools, MySQL, Redis), but no paid, slow or random model calls.
+ */
+export async function startAppWithLlm(
+  llm: LlmClient,
+  overrides: NodeJS.ProcessEnv = {},
+): Promise<INestApplication> {
+  const env = loadEnv({ ...TEST_ENV, GEMINI_API_KEY: 'not-used', ...overrides });
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(env)] })
+    .overrideProvider(LLM_CLIENT)
+    .useValue(llm)
+    .compile();
+  const app = moduleRef.createNestApplication(new FastifyAdapter(), { logger: false });
+  await listen(app, { ...env, port: 0 }, '127.0.0.1');
+  await waitForRedis(app);
+  return app;
+}
+
 /** The background worker (outbox relay, email consumer, cleanup), connected to RabbitMQ. */
-export async function startWorker(overrides: NodeJS.ProcessEnv = {}): Promise<INestApplication> {
-  const env = loadEnv({ ...TEST_ENV, CLEANUP_INTERVAL_SECONDS: '3600', ...overrides }, 'worker');
-  const app = await NestFactory.create(WorkerModule.forRoot(env), new FastifyAdapter(), { logger: false });
+export async function startWorker(
+  overrides: NodeJS.ProcessEnv = {},
+): Promise<INestApplication> {
+  const env = loadEnv(
+    { ...TEST_ENV, CLEANUP_INTERVAL_SECONDS: '3600', ...overrides },
+    'worker',
+  );
+  const app = await NestFactory.create(
+    WorkerModule.forRoot(env),
+    new FastifyAdapter(),
+    { logger: false },
+  );
   await app.listen(0, '127.0.0.1');
   const rabbit = app.get(RabbitService);
   for (let i = 0; i < 250 && !rabbit.isReady; i++) await sleep(20);
-  if (!rabbit.isReady) throw new Error('worker could not connect to RabbitMQ (docker compose up -d rabbitmq?)');
+  if (!rabbit.isReady)
+    throw new Error(
+      'worker could not connect to RabbitMQ (docker compose up -d rabbitmq?)',
+    );
   return app;
 }
 
 /** Emails in Mailpit whose subject contains `text`. */
 export async function mailpitCount(text: string): Promise<number> {
-  const res = await fetch(`http://127.0.0.1:8025/api/v1/search?query=${encodeURIComponent(`subject:"${text}"`)}`);
+  const res = await fetch(
+    `http://127.0.0.1:8025/api/v1/search?query=${encodeURIComponent(`subject:"${text}"`)}`,
+  );
   const body = (await res.json()) as { messages_count: number };
   return body.messages_count;
 }
 
 /** Polls until `check` is true (or fails after `timeoutMs`). */
-export async function eventually(check: () => Promise<boolean>, timeoutMs = 10_000): Promise<void> {
+export async function eventually(
+  check: () => Promise<boolean>,
+  timeoutMs = 10_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!(await check())) {
     if (Date.now() > deadline) throw new Error('condition not met in time');
@@ -92,18 +134,24 @@ async function waitForRedis(app: INestApplication) {
 }
 
 /** Current value of a Prometheus counter in this app instance, e.g. cache hits. */
-export async function metric(app: INestApplication, pattern: RegExp): Promise<number> {
+export async function metric(
+  app: INestApplication,
+  pattern: RegExp,
+): Promise<number> {
   const res = await http(app).get('/metrics').expect(200);
   return Number(res.text.match(pattern)?.[1] ?? 0);
 }
 
 export const http = (app: INestApplication) => request(app.getHttpServer());
 
-export const dataSource = (app: INestApplication, module: ModuleName): DataSource =>
-  app.get(getDataSourceToken(module), { strict: false });
+export const dataSource = (
+  app: INestApplication,
+  module: ModuleName,
+): DataSource => app.get(getDataSourceToken(module), { strict: false });
 
 /** Unique per call, so test files can share the databases and run in parallel. */
-export const unique = (prefix: string) => `${prefix}-${randomUUID().slice(0, 8)}`;
+export const unique = (prefix: string) =>
+  `${prefix}-${randomUUID().slice(0, 8)}`;
 
 export interface TestUser {
   email: string;
@@ -115,15 +163,19 @@ export interface TestUser {
 export async function registerUser(app: INestApplication): Promise<TestUser> {
   const email = `${unique('user')}@test.local`;
   const password = 'correct-horse-battery';
-  const res = await http(app).post('/auth/register').send({ email, password }).expect(201);
+  const res = await http(app)
+    .post('/auth/register')
+    .send({ email, password })
+    .expect(201);
   return { email, password, ...res.body };
 }
 
 export async function registerAdmin(app: INestApplication): Promise<TestUser> {
   const user = await registerUser(app);
-  await dataSource(app, 'identity').query(`UPDATE users SET role = 'admin' WHERE email = ?`, [
-    user.email,
-  ]);
+  await dataSource(app, 'identity').query(
+    `UPDATE users SET role = 'admin' WHERE email = ?`,
+    [user.email],
+  );
   // The role is inside the access token, so log in again to get one that says admin.
   const res = await http(app)
     .post('/auth/login')
@@ -135,12 +187,23 @@ export async function registerAdmin(app: INestApplication): Promise<TestUser> {
 export async function createProduct(
   app: INestApplication,
   admin: TestUser,
-  { priceCents = 1999, stock = 10, name = 'Test product' } = {},
+  {
+    priceCents = 1999,
+    stock = 10,
+    name = 'Test product',
+    category = undefined as string | undefined,
+  } = {},
 ): Promise<number> {
   const res = await http(app)
     .post('/products')
     .auth(admin.accessToken, { type: 'bearer' })
-    .send({ sku: unique('SKU'), name, priceCents, description: 'made for tests' })
+    .send({
+      sku: unique('SKU'),
+      name,
+      priceCents,
+      category,
+      description: 'made for tests',
+    })
     .expect(201);
   await http(app)
     .put(`/inventory/${res.body.id}`)

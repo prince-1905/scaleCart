@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ScaleCart demo</title>
+  <link rel="stylesheet" href="demo.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">🛒 ScaleCart</span>
+    <span id="who" class="who" hidden></span>
+    <button id="logout" class="link" hidden>Log out</button>
+  </header>
+
+  <main class="page">
+    <section class="intro">
+      <h1>Demo store</h1>
+      <p>Log in, then ask the shopping assistant (bottom right) to find products, check stock or fill your cart.
+         It only knows this store's catalog and only touches <em>your</em> cart and orders.</p>
+    </section>
+
+    <!-- Shown when logged out -->
+    <form id="login" class="panel">
+      <h2>Log in</h2>
+      <label>Email <input id="email" type="email" autocomplete="username" required value="loadtest+1@scalecart.local"></label>
+      <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Log in</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+
+    <!-- Shown when logged in -->
+    <section id="cart" class="panel" hidden>
+      <div class="panel-head">
+        <h2>Your cart</h2>
+        <button id="clear-cart" class="link">Empty cart</button>
+      </div>
+      <ul id="cart-items" class="cart-items"></ul>
+      <p class="cart-total">Total: <strong id="cart-total">₹0</strong></p>
+      <p class="hint">Checkout and payment stay a human click: the assistant can't spend your money.</p>
+    </section>
+
+    <!-- Shown to admins only. The API enforces this too: hiding a panel is not security. -->
+    <section id="admin" class="panel" hidden>
+      <h2>Generate product copy with AI</h2>
+      <form id="copy-request">
+        <label>Product name <input id="copy-name" required minlength="2" maxlength="200"></label>
+        <label>Category <select id="copy-category" required></select></label>
+        <label>Facts (the AI may only use these)
+          <textarea id="copy-notes" rows="3" maxlength="2000" placeholder="breathable mesh, 280 g, sizes 6-11"></textarea>
+        </label>
+        <button id="copy-generate" type="submit">Generate with AI</button>
+      </form>
+      <p id="copy-status" class="hint" hidden></p>
+
+      <!-- Nothing is saved until the admin has read it and pressed Save. -->
+      <form id="copy-form" hidden>
+        <h3>Review and edit</h3>
+        <label>Title <input id="copy-title" required maxlength="200"></label>
+        <label>Short description <textarea id="copy-short" rows="2"></textarea></label>
+        <label>Long description <textarea id="copy-long" rows="6"></textarea></label>
+        <label>Features (one per line) <textarea id="copy-bullets" rows="5"></textarea></label>
+        <label>SEO title <input id="copy-seo-title"></label>
+        <label>SEO description <textarea id="copy-seo-description" rows="2"></textarea></label>
+        <label>Tags (comma separated) <input id="copy-tags"></label>
+        <label>Save to product ID <input id="copy-product-id" type="number" min="1" required></label>
+        <button type="submit">Save to product</button>
+        <p class="hint">Saving updates the product's name, description and category. The short description, SEO fields
+           and tags are for review only: the products table has no columns for them yet.</p>
+      </form>
+    </section>
+  </main>
+
+  <!-- Chat widget -->
+  <button id="chat-toggle" class="chat-toggle" aria-label="Open the shopping assistant">💬</button>
+  <section id="chat" class="chat" hidden aria-label="Shopping assistant">
+    <header class="chat-head">
+      <span>Shopping assistant</span>
+      <button id="chat-close" class="link" aria-label="Close">✕</button>
+    </header>
+    <div id="messages" class="messages" aria-live="polite"></div>
+    <div id="suggestions" class="suggestions"></div>
+    <div id="status" class="status" hidden></div>
+    <form id="chat-form" class="chat-form">
+      <input id="chat-input" placeholder="Ask about products…" maxlength="2000" autocomplete="off" disabled>
+      <button id="chat-send" type="submit" disabled>Send</button>
+    </form>
+  </section>
+
+  <script src="demo.js"></script>
+</body>
+</html>

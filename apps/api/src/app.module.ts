@@ -1,5 +1,6 @@
 import { DynamicModule, Module, ValidationPipe } from '@nestjs/common';
 import { APP_PIPE } from '@nestjs/core';
+import { AiModule } from './ai/ai.module.js';
 import { CartModule } from './cart/cart.module.js';
 import { CatalogModule } from './catalog/catalog.module.js';
 import { ENV, type Env } from './config/env.js';
@@ -26,6 +27,7 @@ export class AppModule {
         InventoryModule,
         CartModule,
         OrdersModule,
+        AiModule,
         ...(env.labEndpoints ? [LabModule] : []),
       ],
       providers: [

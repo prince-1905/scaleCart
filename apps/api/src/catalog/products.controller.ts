@@ -11,7 +11,12 @@ import {
   Query,
 } from '@nestjs/common';
 import { Public, Roles } from '../common/auth.js';
-import { CreateProductDto, ListProductsQuery, UpdateProductDto } from './catalog.dto.js';
+import {
+  CreateProductDto,
+  ListProductsQuery,
+  SearchProductsQuery,
+  UpdateProductDto,
+} from './catalog.dto.js';
 import { CatalogService } from './catalog.service.js';
 
 @Controller('products')
@@ -22,6 +27,12 @@ export class ProductsController {
   @Get()
   list(@Query() query: ListProductsQuery) {
     return this.catalog.list(query);
+  }
+
+  @Public()
+  @Get('search')
+  search(@Query() query: SearchProductsQuery) {
+    return this.catalog.search(query);
   }
 
   @Public()

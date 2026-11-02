@@ -38,6 +38,11 @@ describe('loadEnv', () => {
       smtpPort: 1025,
       mailFrom: 'ScaleCart <orders@scalecart.local>',
       cleanupIntervalSeconds: 60,
+      geminiApiKey: '',
+      aiModel: 'gemini-3.6-flash',
+      aiThinkingLevel: 'minimal',
+      aiTimeoutMs: 30_000,
+      aiChatPerMinute: 10,
     });
   });
 
@@ -75,6 +80,12 @@ describe('loadEnv', () => {
 
   it('rejects an unknown adapter', () => {
     expect(() => loadEnv({ JWT_SECRET: SECRET, HTTP_ADAPTER: 'koa' })).toThrow(/HTTP_ADAPTER/);
+  });
+
+  it('rejects an unknown AI thinking level', () => {
+    expect(() => loadEnv({ JWT_SECRET: SECRET, AI_THINKING_LEVEL: 'extreme' })).toThrow(
+      /AI_THINKING_LEVEL/,
+    );
   });
 
   it('rejects an invalid port', () => {

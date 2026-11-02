@@ -4,7 +4,12 @@ import { In, Repository } from 'typeorm';
 import { CacheService } from '../cache/cache.service.js';
 import { ENV, type Env } from '../config/env.js';
 import { isDuplicateKey } from '../database/database.js';
-import type { CreateProductDto, ListProductsQuery, UpdateProductDto } from './catalog.dto.js';
+import type {
+  CreateProductDto,
+  ListProductsQuery,
+  SearchProductsQuery,
+  UpdateProductDto,
+} from './catalog.dto.js';
 import { Product } from './product.entity.js';
 import { toBooleanQuery } from './search-query.js';
 
@@ -13,6 +18,7 @@ export interface ProductView {
   sku: string;
   name: string;
   description: string;
+  category: string | null;
   priceCents: number;
 }
 
@@ -27,11 +33,14 @@ const toView = (p: Product): ProductView => ({
   sku: p.sku,
   name: p.name,
   description: p.description,
+  category: p.category,
   priceCents: p.priceCents,
 });
 
 /** Bump when ProductView's shape changes, so old cached JSON is simply never read again. */
-const productKey = (id: number) => `catalog:product:v1:${id}`;
+const productKey = (id: number) => `catalog:product:v2:${id}`;
+
+const RELEVANCE = 'MATCH (p.name, p.description) AGAINST (:search IN BOOLEAN MODE)';
 
 /** The catalog module's public API. Other modules use this, never the products table. */
 @Injectable()
@@ -88,6 +97,42 @@ export class CatalogService {
     return { items, nextAfter: hasMore ? items[items.length - 1].id : null };
   }
 
+  /**
+   * One page of best matches with filters. Every filter is optional; an empty search
+   * returns the cheapest/newest/first products of the category.
+   *
+   * Only categorised products are listed for shoppers: uncategorised ones (the 200k
+   * load-test rows) are "not listed yet", like a draft product in a real shop.
+   */
+  async search(query: SearchProductsQuery): Promise<ProductView[]> {
+    const qb = this.products
+      .createQueryBuilder('p')
+      .where('p.category IS NOT NULL')
+      .limit(query.limit);
+
+    let search: string | null = null;
+    if (query.q?.trim()) {
+      search = toBooleanQuery(query.q);
+      if (!search) return [];
+      qb.andWhere(RELEVANCE, { search });
+    }
+    if (query.category) qb.andWhere('p.category = :category', { category: query.category });
+    if (query.minPriceCents !== undefined) {
+      qb.andWhere('p.priceCents >= :min', { min: query.minPriceCents });
+    }
+    if (query.maxPriceCents !== undefined) {
+      qb.andWhere('p.priceCents <= :max', { max: query.maxPriceCents });
+    }
+
+    if (query.sort === 'price_asc') qb.orderBy('p.priceCents', 'ASC');
+    else if (query.sort === 'price_desc') qb.orderBy('p.priceCents', 'DESC');
+    else if (query.sort === 'newest') qb.orderBy('p.id', 'DESC');
+    else if (search) qb.addSelect(RELEVANCE, 'score').orderBy('score', 'DESC');
+    qb.addOrderBy('p.id', 'ASC');
+
+    return (await qb.getMany()).map(toView);
+  }
+
   async getById(id: number): Promise<ProductView | null> {
     const product = await this.products.findOneBy({ id });
     return product ? toView(product) : null;
@@ -105,10 +150,18 @@ export class CatalogService {
         sku: dto.sku,
         name: dto.name,
         description: dto.description,
+        category: dto.category ?? null,
         priceCents: dto.priceCents,
       });
       const id: number = result.identifiers[0].id;
-      return { id, sku: dto.sku, name: dto.name, description: dto.description, priceCents: dto.priceCents };
+      return {
+        id,
+        sku: dto.sku,
+        name: dto.name,
+        description: dto.description,
+        category: dto.category ?? null,
+        priceCents: dto.priceCents,
+      };
     } catch (err) {
       if (isDuplicateKey(err)) throw new ConflictException(`sku ${dto.sku} already exists`);
       throw err;

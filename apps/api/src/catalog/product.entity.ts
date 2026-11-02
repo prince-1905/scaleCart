@@ -14,6 +14,9 @@ export class Product {
   @Column({ type: 'text' })
   description: string;
 
+  @Column({ type: 'varchar', length: 40, nullable: true })
+  category: string | null;
+
   /** Money as integer cents: floats can't represent 0.10 exactly, so totals would drift. */
   @Column({ name: 'price_cents', type: 'int', unsigned: true })
   priceCents: number;

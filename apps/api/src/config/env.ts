@@ -23,6 +23,8 @@ export type StockReservationStrategy = 'atomic' | 'locking' | 'naive';
  */
 export type NotifyMode = 'outbox' | 'sync';
 
+export type AiThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
+
 /** api = the HTTP server; worker = background process (outbox relay, consumers, cleanup jobs). */
 export type ProcessRole = 'api' | 'worker';
 
@@ -76,6 +78,15 @@ export interface Env {
   mailFrom: string;
   /** How often the worker's cleanup jobs run. */
   cleanupIntervalSeconds: number;
+  /** Empty = AI features are off (the /ai routes answer 503). Never sent to the browser. */
+  geminiApiKey: string;
+  aiModel: string;
+  /** How much the model thinks before answering. minimal ≈ 1 s faster per call than low (E3.5). */
+  aiThinkingLevel: AiThinkingLevel;
+  /** Per model call. The SDK retries 429/5xx itself, so one chat message can take longer. */
+  aiTimeoutMs: number;
+  /** Chat messages per user per minute: each one costs model calls (and free-tier quota). */
+  aiChatPerMinute: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -140,6 +151,13 @@ export function loadEnv(
     throw new Error('STOCK_RESERVATION other than atomic is only allowed with LAB_ENDPOINTS=true');
   }
 
+  const aiThinkingLevel = (source.AI_THINKING_LEVEL ?? 'minimal').toLowerCase();
+  if (!['minimal', 'low', 'medium', 'high'].includes(aiThinkingLevel)) {
+    throw new Error(
+      `Invalid AI_THINKING_LEVEL: ${source.AI_THINKING_LEVEL} (expected minimal|low|medium|high)`,
+    );
+  }
+
   return {
     port,
     httpAdapter,
@@ -167,6 +185,11 @@ export function loadEnv(
     smtpPort: positiveInt(source, 'SMTP_PORT', 1025),
     mailFrom: source.MAIL_FROM ?? 'ScaleCart <orders@scalecart.local>',
     cleanupIntervalSeconds: positiveInt(source, 'CLEANUP_INTERVAL_SECONDS', 60),
+    geminiApiKey: source.GEMINI_API_KEY ?? '',
+    aiModel: source.AI_MODEL ?? 'gemini-3.6-flash',
+    aiThinkingLevel: aiThinkingLevel as AiThinkingLevel,
+    aiTimeoutMs: positiveInt(source, 'AI_TIMEOUT_MS', 30_000),
+    aiChatPerMinute: positiveInt(source, 'AI_CHAT_PER_MINUTE', 10),
   };
 }
 

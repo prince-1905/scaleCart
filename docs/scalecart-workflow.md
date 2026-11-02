@@ -26,10 +26,10 @@ an interviewer through any request from start to finish.
    └────────┬─────────┘
             ▼
    ┌──────────────────────────────────────────────────────────────┐
-   │  API  (Node.js + NestJS)          one app, 5 separate modules │
+   │  API  (Node.js + NestJS)     one app, 5 shop modules + AI     │
    │                                                               │
-   │   identity    catalog    inventory    cart    orders          │
-   └────┬────────────┬───────────┬───────────┬────────┬────────────┘
+   │   identity    catalog    inventory    cart    orders    ai ───┼──► Google Gemini
+   └────┬────────────┬───────────┬───────────┬────────┬────────────┘    (AI model, over the internet)
         │            │  ┌─────────────────────────┐
         │            └─►│ Redis (fast memory)      │  copies of product pages,
         └──────────────►│ OPTIONAL: app works      │  failed-login counters
@@ -63,6 +63,7 @@ an interviewer through any request from start to finish.
 | **Worker** | Background program: moves outbox notes to RabbitMQ, sends emails, runs cleanup jobs. Never talks to customers. | Docker, no public port |
 | **RabbitMQ** | Message queue: a safe "order rail" that holds jobs until a worker takes them. | Docker, UI at port 15672 |
 | **Mailpit** | Fake email server: catches every email so you can read it in the browser. | Docker, inbox at port 8025 |
+| **Google Gemini** | The AI model behind the shopping assistant. We call its API; it never touches our database. | Google's servers (free tier) |
 | **migrate job** | Runs once at startup to create the databases and tables, then exits. | Docker |
 | **Prometheus** | Collects performance numbers (speed, errors, CPU). | Docker, port 9090 |
 | **Grafana** | Dashboard showing those numbers as charts. | Docker, port 3001 |
@@ -91,9 +92,9 @@ would trip over each other. One job does it first, and the app waits for it.
 
 ---
 
-## 4. The 6 modules: who owns what data
+## 4. The 7 modules: who owns what data
 
-Picture 6 departments in a shop. Each has **its own notebook**, and nobody writes in another
+Picture 7 departments in a shop. Each has **its own notebook**, and nobody writes in another
 department's notebook. If one department needs something, it **asks** the other department.
 
 | Module | Its job | What it stores (tables) |
@@ -104,6 +105,10 @@ department's notebook. If one department needs something, it **asks** the other 
 | **cart** | Each user's cart | `cart_items`: user, product, quantity (max 10 each, max 50 different products) |
 | **orders** | Checkout and order history | `orders`: who, total, status · `order_items`: **copy** of name + price at the time of purchase · `idempotency_keys`: remembers each checkout attempt and its answer · `outbox`: "order.created" notes waiting to be sent to RabbitMQ |
 | **notifications** | Confirmation emails (runs in the worker) | `sent_notifications`: which order events already got their email, so a repeat is skipped |
+| **ai** | The shopping assistant (chat) | **Nothing.** It has no database: it only *asks* catalog, inventory, cart and orders through their services, like any other module |
+
+Products also have a **category** (footwear, electronics…). Products without one are "not listed yet":
+search and the assistant never show them. That hides the 200,000 load-test products from the demo.
 
 **What lives in RabbitMQ** (jobs in transit, stored on disk):
 
@@ -117,9 +122,12 @@ department's notebook. If one department needs something, it **asks** the other 
 
 | Key | Example | Lives for | Owner |
 |---|---|---|---|
-| Cached product page | `catalog:product:v1:42` → the product's JSON | ~60 s | catalog |
-| Cached "doesn't exist" | `catalog:product:v1:999999` → null | ~10 s | catalog |
+| Cached product page | `catalog:product:v2:42` → the product's JSON | ~60 s | catalog |
+| Cached "doesn't exist" | `catalog:product:v2:999999` → null | ~10 s | catalog |
 | Failed logins per email | `identity:login-failures:<hash of email>` → 3 | 15 min | identity |
+| Chat messages per user | `ai:chat:<user id>` → 4 | 1 min | ai |
+
+(`v2`: the key's version went up when products got a category, so old cached copies without it are simply never read again.)
 
 Stock, orders, carts and idempotency keys are **never** in Redis: they must survive a crash and be exact.
 
@@ -150,6 +158,7 @@ NGINX does **not** pick the module; it only forwards to the app. Inside the app,
 | `/inventory/...` | inventory |
 | `/cart...` | cart |
 | `/checkout`, `/orders...` | orders |
+| `/ai/...` | ai |
 | `/health/...`, `/metrics` | monitoring |
 
 After the microservice split, these same path rules move into NGINX / an API gateway, which then sends
@@ -202,6 +211,10 @@ The **refresh token** is the ticket you show at the gate to get a new wristband 
 2. catalog: ask MySQL using the search index (FULLTEXT) on name + description
 3. Return 20 products + a bookmark ("nextAfter") for the next page
 ```
+
+**Filtered search (`GET /products/search?q=shoes&category=footwear&maxPriceCents=300000&sort=price_asc`)**
+is the same search plus category, price range and sorting, with up to 20 results. The AI assistant's
+`search_products` tool uses it.
 
 **Opening one product page (`GET /products/42`) uses the cache ("cache-aside"):**
 
@@ -340,6 +353,41 @@ The API only writes to MySQL; the worker deals with RabbitMQ.
 
 Every job is safe to run twice at the same time, so several workers need no coordination.
 
+### J. Chat with the AI shopping assistant (Phase 3.5)
+
+`POST /ai/chat` with the conversation so far (plain text only). You must be logged in, because the assistant
+can fill *your* cart.
+
+```
+ 1. LIMITS     Assistant switched on (GEMINI_API_KEY set)? No → 503.
+               More than 10 messages this minute (Redis counter)? → 429, before any AI call.
+ 2. LOOP       Up to 5 rounds:
+                 send Gemini: our rules ("system prompt") + the conversation + 5 tool descriptions
+                 Gemini answers in words?          → done
+                 Gemini asks for a tool instead    → our code checks the inputs and runs it:
+                     search_products       → catalog (filtered search, max 5 results)
+                     get_product_details   → catalog (cached product page)
+                     check_stock           → inventory
+                     add_to_cart           → cart       (YOUR cart: the user id comes from the token)
+                     get_order_status      → orders     (YOUR orders only)
+                 send the tool's result back, and go round again
+ 3. ANSWER     { reply, product cards, which tools ran, rounds, tokens, time }
+```
+
+**The AI never runs anything itself.** It can only *ask*, and our code decides. Analogy: a shop assistant
+who can't enter the stockroom. They hand a slip to the clerk, who checks it before fetching anything.
+
+**Safety comes from code, not from the AI behaving well:**
+- **Whose data:** taken from the login token, never from the AI. Asked "show me user 5's orders", the tool
+  still returned only the logged-in user's orders.
+- **Bad inputs** (quantity 50, unknown tool, extra fields like `user_id`) are rejected by the checks and sent back
+  to the AI as an error, so it can fix them.
+- **No checkout or payment tool:** the AI can fill a cart, but spending money stays a human click.
+- **AI provider down or over its limit:** a clean "assistant is busy" error. The shop itself is unaffected.
+
+Every round and every tool call (name, inputs, result, time) is written to the API log:
+`docker compose logs -f api`. Full details are in [AI_LEARNING.md](AI_LEARNING.md).
+
 ---
 
 ## 6. How we watch it (observability)
@@ -365,7 +413,8 @@ Every job is safe to run twice at the same time, so several workers need no coor
 | Waiting room for drops | Bursts queue inside the app (p99 up to 27 s in E2) | later (admission control / load shedding) |
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Autoscaling | Copies are added by hand (`API_REPLICAS=4`) | Kubernetes phase |
-| Demo website | Swagger page only | Phase 4.5 |
+| Demo website | Only a login + cart + chat page (http://localhost:8088/demo/) | Phase 4.5 (product pages, drop countdown, checkout) |
+| AI extras | Chat with live progress ("🔧 searching…") | Phase 3.5: AI product descriptions for admins, MCP server |
 | 2FA, microservices, tracing | – | later |
 
 ---
@@ -394,8 +443,15 @@ Every job is safe to run twice at the same time, so several workers need no coor
    error for orders that existed** (47 never emailed). With the outbox: **0 errors, 0 lost, 0 duplicate emails**
    across a frozen mail server, a killed worker and a restarted RabbitMQ (9,480 orders).
 
+6d. **Phase 3.5 numbers (AI assistant, single runs so far):** "running shoes under 3000" took **2 rounds, 2.8 s**.
+   Each AI round took **1.2–1.8 s**, while our tools took **16–113 ms**, so the AI is the slow part. About
+   **1,050 tokens** are sent before the user types anything (rules + tool descriptions). Google's free tier
+   refused after **~5 AI calls in ~30 s**, and our API turned that into a clean "busy" message.
+
 The detailed numbers are in [experiments/E1](experiments/E1-checkout-auth-and-queries.md),
-[experiments/E2](experiments/E2-cache-adapters-scaling.md) and [experiments/E3](experiments/E3-outbox-queue-failures.md).
+[experiments/E2](experiments/E2-cache-adapters-scaling.md), [experiments/E3](experiments/E3-outbox-queue-failures.md) and
+[experiments/E3.5](experiments/E3.5-ai-assistant.md).
 Follow-up questions with answers are in [interview-notes/phase-1](interview-notes/phase-1-shop-core.md),
-[interview-notes/phase-2](interview-notes/phase-2-caching-and-scaling.md) and
-[interview-notes/phase-3](interview-notes/phase-3-messaging-and-outbox.md).
+[interview-notes/phase-2](interview-notes/phase-2-caching-and-scaling.md),
+[interview-notes/phase-3](interview-notes/phase-3-messaging-and-outbox.md) and
+[interview-notes/phase-3.5](interview-notes/phase-3.5-ai-assistant.md).

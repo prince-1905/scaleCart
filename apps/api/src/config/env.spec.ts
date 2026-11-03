@@ -43,6 +43,11 @@ describe('loadEnv', () => {
       aiThinkingLevel: 'minimal',
       aiTimeoutMs: 30_000,
       aiChatPerMinute: 10,
+      razorpayKeyId: '',
+      razorpayKeySecret: '',
+      razorpayWebhookSecret: '',
+      paymentTimeoutSeconds: 900,
+      paymentJobsIntervalSeconds: 30,
     });
   });
 

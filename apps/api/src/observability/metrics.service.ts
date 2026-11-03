@@ -129,6 +129,32 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  // ---- Phase 4: payments ----
+
+  /** paid, duplicate, refund, failed, ignored, unknown_order, started… by where the news came from. */
+  readonly payments = new Counter({
+    name: 'payments_total',
+    help: 'Payment results by outcome and source (webhook, browser, reconcile).',
+    labelNames: ['outcome', 'source'] as const,
+    registers: [this.registry],
+  });
+
+  /** Webhook deliveries by event and result (an outcome, duplicate, bad_signature, malformed). */
+  readonly paymentWebhooks = new Counter({
+    name: 'payment_webhooks_total',
+    help: 'Payment provider webhook deliveries by event and result.',
+    labelNames: ['event', 'result'] as const,
+    registers: [this.registry],
+  });
+
+  /** Orders expired, paid orders found by reconciliation, refunds sent or failed. */
+  readonly paymentJobs = new Counter({
+    name: 'payment_jobs_total',
+    help: 'Work done by the payment jobs, by job.',
+    labelNames: ['job'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

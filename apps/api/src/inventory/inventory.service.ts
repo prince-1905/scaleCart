@@ -110,6 +110,17 @@ export class InventoryService {
     );
   }
 
+  /**
+   * The order was paid: its reserved stock is sold for good. The stock count already went
+   * down at reserve time; this only stops release() from ever giving it back. Safe to repeat.
+   */
+  async commit(orderId: string): Promise<void> {
+    await this.db.query(
+      `UPDATE reservations SET status = 'committed' WHERE order_id = ? AND status = 'reserved'`,
+      [orderId],
+    );
+  }
+
   private async take(m: EntityManager, { productId, quantity }: StockLine): Promise<boolean> {
     switch (this.strategy) {
       case 'atomic': {

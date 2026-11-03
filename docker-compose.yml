@@ -125,6 +125,11 @@ services:
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
       CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-60}
+      # Payments (Phase 4): the worker expires unpaid orders (after asking Razorpay) and sends refunds.
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
+      PAYMENT_JOBS_INTERVAL_SECONDS: ${PAYMENT_JOBS_INTERVAL_SECONDS:-30}
       NODE_OPTIONS: --max-old-space-size=192
     depends_on:
       migrate:
@@ -189,6 +194,11 @@ services:
       AI_MODEL: ${AI_MODEL:-gemini-3.6-flash}
       AI_THINKING_LEVEL: ${AI_THINKING_LEVEL:-minimal}
       AI_CHAT_PER_MINUTE: ${AI_CHAT_PER_MINUTE:-10}
+      # Payments (Phase 4). Empty keys = payments off (payment routes answer 503).
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:

@@ -8,6 +8,8 @@ import { loggerModule } from '../observability/logger.js';
 import { ObservabilityModule } from '../observability/observability.module.js';
 import { OrdersCoreModule } from '../orders/orders-core.module.js';
 import { OutboxRelay } from '../orders/outbox-relay.js';
+import { PaymentJobs } from '../payments/payment-jobs.js';
+import { PaymentsCoreModule } from '../payments/payments-core.module.js';
 import { CleanupService } from './cleanup.service.js';
 
 /**
@@ -30,7 +32,7 @@ class WorkerHealthController {
 }
 
 /**
- * The background process: outbox relay, notification consumer and cleanup jobs.
+ * The background process: outbox relay, notification consumer, cleanup and payment jobs.
  * Same codebase and image as the API, different entry point (dist/worker.js), so it
  * scales separately: more API replicas for traffic, more workers for backlog.
  * It serves only /metrics and /health.
@@ -48,9 +50,10 @@ export class WorkerModule {
         OrdersCoreModule,
         InventoryCoreModule,
         NotificationsModule,
+        PaymentsCoreModule,
       ],
       controllers: [WorkerHealthController],
-      providers: [{ provide: ENV, useValue: env }, OutboxRelay, CleanupService],
+      providers: [{ provide: ENV, useValue: env }, OutboxRelay, CleanupService, PaymentJobs],
       exports: [ENV],
     };
   }

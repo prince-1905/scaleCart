@@ -40,10 +40,10 @@ input, select, textarea { font: inherit; }
 }
 #admin textarea { resize: vertical; line-height: 1.45; }
 #admin h3 { margin: 20px 0 12px; font-size: 16px; }
-#login button[type=submit], #admin button[type=submit], .chat-form button {
+#login button[type=submit], #admin button[type=submit], .chat-form button, #checkout {
   background: var(--brand); color: #fff; border: none; border-radius: 8px; padding: 10px 16px;
 }
-#admin button:disabled { opacity: .5; cursor: default; }
+#admin button:disabled, #checkout:disabled { opacity: .5; cursor: default; }
 .error { color: var(--error); font-size: 14px; }
 .hint { color: var(--muted); font-size: 13px; }
 

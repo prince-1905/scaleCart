@@ -87,6 +87,15 @@ export interface Env {
   aiTimeoutMs: number;
   /** Chat messages per user per minute: each one costs model calls (and free-tier quota). */
   aiChatPerMinute: number;
+  /** Razorpay test/live API keys. Empty = payments off (the payment routes answer 503). */
+  razorpayKeyId: string;
+  razorpayKeySecret: string;
+  /** Signs Razorpay's webhooks (set in the Razorpay dashboard). Different from the key secret. */
+  razorpayWebhookSecret: string;
+  /** An unpaid order is cancelled and its stock released after this long. */
+  paymentTimeoutSeconds: number;
+  /** How often the worker expires overdue orders and sends pending refunds. */
+  paymentJobsIntervalSeconds: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -190,6 +199,11 @@ export function loadEnv(
     aiThinkingLevel: aiThinkingLevel as AiThinkingLevel,
     aiTimeoutMs: positiveInt(source, 'AI_TIMEOUT_MS', 30_000),
     aiChatPerMinute: positiveInt(source, 'AI_CHAT_PER_MINUTE', 10),
+    razorpayKeyId: source.RAZORPAY_KEY_ID ?? '',
+    razorpayKeySecret: source.RAZORPAY_KEY_SECRET ?? '',
+    razorpayWebhookSecret: source.RAZORPAY_WEBHOOK_SECRET ?? '',
+    paymentTimeoutSeconds: positiveInt(source, 'PAYMENT_TIMEOUT_SECONDS', 900),
+    paymentJobsIntervalSeconds: positiveInt(source, 'PAYMENT_JOBS_INTERVAL_SECONDS', 30),
   };
 }
 

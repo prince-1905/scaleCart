@@ -37,7 +37,21 @@
       </div>
       <ul id="cart-items" class="cart-items"></ul>
       <p class="cart-total">Total: <strong id="cart-total">₹0</strong></p>
+      <button id="checkout" type="button" disabled>Checkout and pay</button>
       <p class="hint">Checkout and payment stay a human click: the assistant can't spend your money.</p>
+    </section>
+
+    <!-- Shown when logged in. Paying opens Razorpay's own (test mode) checkout. -->
+    <section id="orders" class="panel" hidden>
+      <div class="panel-head">
+        <h2>Your orders</h2>
+        <button id="refresh-orders" class="link">Refresh</button>
+      </div>
+      <p id="pay-status" class="hint" hidden></p>
+      <ul id="order-items" class="cart-items"></ul>
+      <p class="hint">Test mode: card 4100 2800 0000 1007, any future expiry, any CVV, OTP of 4+ digits (fewer digits = a
+         failed payment). The order is marked paid only when Razorpay's signed webhook (or our own check with Razorpay)
+         confirms it; unpaid orders are cancelled after 15 minutes and their stock goes back.</p>
     </section>
 
     <!-- Shown to admins only. The API enforces this too: hiding a panel is not security. -->

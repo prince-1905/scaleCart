@@ -17,6 +17,10 @@ export class Order {
   @Column({ name: 'total_cents', type: 'int', unsigned: true })
   totalCents: number;
 
+  /** The provider payment that paid this order (null until paid). */
+  @Column({ name: 'payment_id', type: 'varchar', length: 40, nullable: true })
+  paymentId: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'datetime', precision: 3 })
   createdAt: Date;
 

@@ -12,10 +12,11 @@ export async function createApp(
   const module = AppModule.forRoot(env);
 
   // Same application code on either adapter, so they can be compared fairly (Phase 2 experiment).
+  // rawBody: payment webhooks are signed over their exact bytes (req.rawBody), not the parsed JSON.
   const app =
     env.httpAdapter === 'fastify'
-      ? await NestFactory.create(module, new FastifyAdapter(), options)
-      : await NestFactory.create(module, options);
+      ? await NestFactory.create(module, new FastifyAdapter(), { ...options, rawBody: true })
+      : await NestFactory.create(module, { ...options, rawBody: true });
 
   if (env.apiDocs) {
     const config = new DocumentBuilder()

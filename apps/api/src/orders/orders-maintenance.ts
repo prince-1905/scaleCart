@@ -10,13 +10,6 @@ const BATCH = 1_000;
 export class OrdersMaintenance {
   constructor(@InjectDataSource('orders') private readonly db: DataSource) {}
 
-  /** Which of these order ids exist. Used to tell legitimate stock reservations from orphans. */
-  async existingOrderIds(ids: string[]): Promise<Set<string>> {
-    if (ids.length === 0) return new Set();
-    const rows: { id: string }[] = await this.db.query('SELECT id FROM orders WHERE id IN (?)', [ids]);
-    return new Set(rows.map((r) => r.id));
-  }
-
   /** Nobody retries a click from yesterday: forget keys older than `hours`. */
   deleteIdempotencyKeysOlderThan(hours: number): Promise<number> {
     return this.deleteInBatches(

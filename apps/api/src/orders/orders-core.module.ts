@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { moduleTypeOrm } from '../database/module-typeorm.js';
+import { OrderLifecycle } from './order-lifecycle.js';
 import { OrdersMaintenance } from './orders-maintenance.js';
 import { ordersDatabase } from './orders.database.js';
 import { OrdersService } from './orders.service.js';
@@ -7,7 +8,7 @@ import { OrdersService } from './orders.service.js';
 /** Orders' data access without HTTP; used by the API (via OrdersModule) and the worker. */
 @Module({
   imports: [...moduleTypeOrm(ordersDatabase)],
-  providers: [OrdersService, OrdersMaintenance],
-  exports: [OrdersService, OrdersMaintenance],
+  providers: [OrdersService, OrdersMaintenance, OrderLifecycle],
+  exports: [OrdersService, OrdersMaintenance, OrderLifecycle],
 })
 export class OrdersCoreModule {}

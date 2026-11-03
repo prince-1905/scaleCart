@@ -347,13 +347,39 @@ The API only writes to MySQL; the worker deals with RabbitMQ.
 
 | Job | Why |
 |---|---|
-| Release **orphan stock reservations** older than 10 min whose order doesn't exist | If the API crashed between "take stock" and "save order", that stock was stuck forever (the Phase 1 gap) |
+| Fix **stock reservations** still "reserved" after 10 min: release them if the order doesn't exist or was cancelled, commit them if it was paid | If the API crashed between "take stock" and "save order" (the Phase 1 gap), or between "order decided" and "stock updated" (Phase 4), the stock was stuck |
 | Delete **idempotency keys** older than 24 h | Nobody retries yesterday's click; the table would grow forever |
 | Delete **sent outbox notes** older than 7 days | Kept only for debugging |
 
 Every job is safe to run twice at the same time, so several workers need no coordination.
 
-### J. Chat with the AI shopping assistant (Phase 3.5)
+### J. Paying with Razorpay ⭐ (Phase 4)
+
+```
+ 1. "Pay"  POST /orders/:id/payment            our API → Razorpay: create a Razorpay order (₹ in paise)
+           (your own unpaid order, ≥ 60 s before it expires; a second click reuses the same Razorpay order)
+ 2. The browser opens Razorpay Checkout → the bank page (redirect mode: same tab, no pop-up)
+ 3. Razorpay takes the money, then tells us, in ANY order and maybe MORE THAN ONCE:
+      a. WEBHOOK   Razorpay → POST /payments/razorpay/webhook       ← the source of truth
+                   signature = HMAC-SHA256(raw body, webhook secret); wrong → 400
+      b. BROWSER   back to POST /payments/razorpay/callback (or /confirm)
+                   signature = HMAC-SHA256("order_id|payment_id", key secret) + we ask Razorpay
+ 4. Both end in applyPayment():
+      save the payment (keyed by Razorpay's payment id)
+      UPDATE orders SET status='paid' WHERE id=? AND status='pending_payment'
+        1 row  → paid: stock "committed" (sold for good)
+        0 rows → already paid by this payment → duplicate (nothing happens)
+               → paid by ANOTHER payment, or order cancelled → refund this one (worker sends it)
+ 5. Worker, every 30 s: unpaid after 15 min? First ask Razorpay "was it paid?" (lost webhook),
+    then cancel + give the stock back. Can't reach Razorpay → don't cancel, try next round.
+```
+
+**Analogy:** the browser is the customer saying "I paid at the counter"; the webhook is the bank's own SMS to the
+shop. We believe the bank, keep listening until it gets through, and count each payment once.
+**Measured (E4):** 100 webhooks for one payment at once → exactly 1 "paid", 6/6 runs; a live webhook was processed
+in 58 ms; the expiry job cleared 39,807 abandoned orders in ~8 min.
+
+### K. Chat with the AI shopping assistant (Phase 3.5)
 
 `POST /ai/chat` with the conversation so far (plain text only). You must be logged in, because the assistant
 can fill *your* cart.
@@ -409,12 +435,12 @@ Every round and every tool call (name, inputs, result, time) is written to the A
 
 | Not yet | Today | Coming in |
 |---|---|---|
-| Payment | Orders stay `pending_payment` forever, and their stock stays reserved | Phase 4 (payment simulator + saga, payment timeout releases stock) |
+| Live refund test | Refunds (late payment, paid twice) are proven with a fake Razorpay in tests, not yet against real Razorpay | next live session |
+| Stable webhook URL | Webhooks reach the laptop through a cloudflared quick tunnel whose address changes every run | a real deployment |
 | Waiting room for drops | Bursts queue inside the app (p99 up to 27 s in E2) | later (admission control / load shedding) |
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Autoscaling | Copies are added by hand (`API_REPLICAS=4`) | Kubernetes phase |
-| Demo website | Only a login + cart + chat page (http://localhost:8088/demo/) | Phase 4.5 (product pages, drop countdown, checkout) |
-| AI extras | Chat with live progress ("🔧 searching…") | Phase 3.5: AI product descriptions for admins, MCP server |
+| Demo website | Login, cart, checkout + Razorpay payment, orders, AI chat, admin product copy (http://localhost:8088/demo/) | Phase 4.5 (product pages, drop countdown) |
 | 2FA, microservices, tracing | – | later |
 
 ---

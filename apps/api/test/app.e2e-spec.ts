@@ -26,6 +26,7 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('api on %s', (adapter) =>
       'db_inventory',
       'db_cart',
       'db_orders',
+      'db_payments',
     ]);
   });
 

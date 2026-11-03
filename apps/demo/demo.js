@@ -71,6 +71,8 @@ function logout(message) {
   sessionStorage.clear();
   $('login').hidden = false;
   $('cart').hidden = true;
+  $('orders').hidden = true;
+  setPayStatus(null);
   $('admin').hidden = true;
   $('copy-form').hidden = true;
   setCopyStatus(null);
@@ -86,6 +88,8 @@ function logout(message) {
 function showLoggedIn() {
   $('login').hidden = true;
   $('cart').hidden = false;
+  $('orders').hidden = false;
+  refreshOrders();
   $('admin').hidden = !isAdmin();
   $('who').textContent = sessionStorage.getItem('email') ?? '';
   $('who').hidden = false;
@@ -109,6 +113,174 @@ async function refreshCart() {
     list.append(li);
   }
   $('cart-total').textContent = inr(cart.totalCents / 100);
+  $('checkout').disabled = cart.items.length === 0;
+}
+
+// ---------- checkout and payment (Razorpay test mode) ----------
+
+const STATUS_LABEL = { pending_payment: 'waiting for payment', paid: 'paid ✅', cancelled: 'cancelled' };
+// One key per checkout attempt, reused if the same attempt is retried (e.g. after a network error).
+let checkoutKey = null;
+
+function setPayStatus(text, isError = false) {
+  $('pay-status').hidden = !text;
+  $('pay-status').textContent = text ?? '';
+  $('pay-status').classList.toggle('error', isError);
+}
+
+$('checkout').addEventListener('click', async () => {
+  $('checkout').disabled = true;
+  checkoutKey ??= crypto.randomUUID();
+  const res = await api('/checkout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': checkoutKey },
+    body: '{}',
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    setPayStatus(errorMessage(body, res.status), true);
+    $('checkout').disabled = false;
+    return;
+  }
+  checkoutKey = null;
+  await refreshCart();
+  await refreshOrders();
+  await pay(body.id);
+});
+
+$('refresh-orders').addEventListener('click', () => refreshOrders());
+
+async function refreshOrders() {
+  const res = await api('/orders?limit=5');
+  if (!res.ok) return;
+  const { items } = await res.json();
+  const list = $('order-items');
+  list.replaceChildren();
+  if (items.length === 0) list.append(el('li', 'empty', 'No orders yet.'));
+  for (const order of items) {
+    const li = el('li');
+    li.append(el('span', '', `#${order.id.slice(-6)} · ${inr(order.totalCents / 100)} · ${STATUS_LABEL[order.status] ?? order.status}`));
+    if (order.status === 'pending_payment') {
+      const button = el('button', 'link', 'Pay');
+      button.addEventListener('click', () => pay(order.id));
+      li.append(button);
+    }
+    list.append(li);
+  }
+}
+
+let checkoutScript = null;
+/** Razorpay's checkout script, loaded only when someone pays. */
+function loadRazorpay() {
+  checkoutScript ??= new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    s.onload = resolve;
+    s.onerror = () => {
+      checkoutScript = null;
+      reject(new Error('could not load Razorpay Checkout'));
+    };
+    document.head.append(s);
+  });
+  return checkoutScript;
+}
+
+async function pay(orderId) {
+  setPayStatus('Opening Razorpay…');
+  const res = await api(`/orders/${orderId}/payment`, { method: 'POST' });
+  const session = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    setPayStatus(errorMessage(session, res.status), true);
+    return;
+  }
+  try {
+    await loadRazorpay();
+  } catch (err) {
+    setPayStatus(err.message, true);
+    return;
+  }
+  const secondsLeft = Math.floor((new Date(session.expiresAt) - Date.now()) / 1000);
+  const checkout = new window.Razorpay({
+    key: session.keyId,
+    order_id: session.providerOrderId,
+    amount: session.amountPaise,
+    currency: session.currency,
+    name: 'ScaleCart (test mode)',
+    description: `Order #${orderId.slice(-6)}`,
+    prefill: { email: sessionStorage.getItem('email') ?? '' },
+    // Close the payment page before our order expires, so nobody pays for a cancelled order.
+    timeout: Math.max(secondsLeft - 30, 30),
+    theme: { color: '#2563eb' },
+    // Redirect mode: the bank page replaces this page instead of opening a pop-up window
+    // (pop-ups got blocked in testing). Razorpay then POSTs the result to our callback,
+    // which sends the browser back here with ?order=…&payment=….
+    redirect: true,
+    callback_url: `${location.origin}/payments/razorpay/callback?order=${orderId}`,
+    handler: (response) => confirmPayment(orderId, response),
+    modal: {
+      ondismiss: () => setPayStatus(`Payment not finished. The order is held until ${new Date(session.expiresAt).toLocaleTimeString()}.`),
+    },
+  });
+  checkout.on('payment.failed', (response) => {
+    setPayStatus(`Payment failed: ${response.error?.description ?? 'unknown error'}. You can try again.`, true);
+  });
+  checkout.open();
+}
+
+/** Back from Razorpay's redirect: our callback put the result in the address. */
+async function showRedirectResult() {
+  const params = new URLSearchParams(location.search);
+  const orderId = params.get('order');
+  const result = params.get('payment');
+  if (!result) return;
+  history.replaceState(null, '', location.pathname); // a reload shouldn't show it again
+  if (result === 'failed' || result === 'error') {
+    const why = result === 'failed' ? params.get('reason') ?? 'payment failed' : 'the payment could not be verified';
+    setPayStatus(`Payment not completed: ${why}. You can try again.`, true);
+    return;
+  }
+  if (orderId) await waitForPaid(orderId, result === 'paid' ? 'paid' : 'pending_payment');
+}
+
+/**
+ * Razorpay says "paid" in the browser. Our API checks the signature and asks Razorpay
+ * itself; the webhook settles the order either way, so we then just wait for "paid".
+ */
+async function confirmPayment(orderId, response) {
+  setPayStatus('Payment received by Razorpay, confirming…');
+  const res = await api('/payments/razorpay/confirm', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      providerOrderId: response.razorpay_order_id,
+      paymentId: response.razorpay_payment_id,
+      signature: response.razorpay_signature,
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    setPayStatus(errorMessage(body, res.status), true);
+    return;
+  }
+  await waitForPaid(orderId, body.orderStatus);
+}
+
+/** Polls the order for up to 20 s: the webhook may land a moment after the browser. */
+async function waitForPaid(orderId, status) {
+  setPayStatus('Payment received by Razorpay, confirming…');
+  for (let i = 0; i < 20 && status === 'pending_payment'; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    status = (await (await api(`/orders/${orderId}`)).json()).status;
+  }
+  setPayStatus(
+    status === 'paid'
+      ? `Paid ✅ Order #${orderId.slice(-6)} is confirmed.`
+      : status === 'cancelled'
+        ? 'The order had expired: your money will be refunded automatically.'
+        : 'Still waiting for Razorpay to confirm. Refresh in a moment.',
+    status === 'cancelled',
+  );
+  refreshOrders();
 }
 
 // No Content-Type on a bodyless DELETE: Fastify rejects an empty JSON body.
@@ -388,5 +560,8 @@ function el(tag, className = '', text) {
 // ---------- start ----------
 
 renderSuggestions();
-if (token) showLoggedIn();
+if (token) {
+  showLoggedIn();
+  showRedirectResult();
+}
 else logout();

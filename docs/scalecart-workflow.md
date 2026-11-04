@@ -379,7 +379,30 @@ shop. We believe the bank, keep listening until it gets through, and count each 
 **Measured (E4):** 100 webhooks for one payment at once → exactly 1 "paid", 6/6 runs; a live webhook was processed
 in 58 ms; the expiry job cleared 39,807 abandoned orders in ~8 min.
 
-### K. Chat with the AI shopping assistant (Phase 3.5)
+### K. A drop and its waiting room ⭐ (Phase 4.5)
+
+```
+ Admin: POST /drops {productId, startsAt, maxPerCustomer, admitPerSecond | maxShoppers}
+ Anyone: GET /drops → name, price, stock, start time + the SERVER's clock (for the countdown)
+
+ 1. Join the line   POST /drops/:id/queue   (opens 10 min before the start; repeat the same call to ask "my turn?")
+    Redis Lua script: your ticket if you have one, else INCR → a new number. One per customer.
+ 2. Who's called?
+      time-based:        tickets ≤ seconds since start × admitPerSecond   (pure arithmetic, no job)
+      "one out, one in": at most maxShoppers called at once; a place frees when one buys / sells out / 60 s pass
+ 3. Called → a signed pass (HMAC: drop, user, ticket, expiry)
+ 4. Checkout {dropPass} → before ANY stock is touched:
+      quantity ≤ maxPerCustomer · valid pass (or: not started yet → 409) · INSERT drop_purchases (drop, user)
+      primary key = one purchase per customer · then the normal checkout (reserve stock, order, outbox)
+    Redis down → the line answers 503 (fail closed); stock is in MySQL, so it can't oversell.
+```
+
+**Analogy:** a bank's token machine. Everyone takes a number; the screen calls numbers at the speed the counters can
+serve; only the called number can go to the counter.
+**Measured (E5):** healthy runs: checkout p50 0.26 s with the room vs 3.7 s without. A bad run without it: 259 timeouts,
+and ~255 of those customers had actually bought.
+
+### L. Chat with the AI shopping assistant (Phase 3.5)
 
 `POST /ai/chat` with the conversation so far (plain text only). You must be logged in, because the assistant
 can fill *your* cart.
@@ -437,10 +460,10 @@ Every round and every tool call (name, inputs, result, time) is written to the A
 |---|---|---|
 | Live refund test | Refunds (late payment, paid twice) are proven with a fake Razorpay in tests, not yet against real Razorpay | next live session |
 | Stable webhook URL | Webhooks reach the laptop through a cloudflared quick tunnel whose address changes every run | a real deployment |
-| Waiting room for drops | Bursts queue inside the app (p99 up to 27 s in E2) | later (admission control / load shedding) |
+| "Your turn" push | The waiting room makes browsers ask "my turn?" every 0.5–5 s; in "one out, one in" mode freed places sit empty until then (line ~23/s instead of 50/s, E5b) | later (SSE / WebSocket) |
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Autoscaling | Copies are added by hand (`API_REPLICAS=4`) | Kubernetes phase |
-| Demo website | Login, cart, checkout + Razorpay payment, orders, AI chat, admin product copy (http://localhost:8088/demo/) | Phase 4.5 (product pages, drop countdown) |
+| Demo website | Drops with countdown + waiting room, cart, checkout + Razorpay payment, orders, AI chat, admin product copy and drops (http://localhost:8088/demo/) | product pages, later |
 | 2FA, microservices, tracing | – | later |
 
 ---

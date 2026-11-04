@@ -155,6 +155,24 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  // ---- Phase 4.5: drops and the waiting room ----
+
+  /** Queue calls by result: waiting, admitted (a pass was issued), unavailable (Redis down). */
+  readonly dropQueue = new Counter({
+    name: 'drop_queue_requests_total',
+    help: 'Waiting-room calls by result.',
+    labelNames: ['result'] as const,
+    registers: [this.registry],
+  });
+
+  /** Drop checkouts refused before any stock was touched: drop_not_started, drop_pass_required, drop_limit, drop_already_bought. */
+  readonly dropCheckoutRejections = new Counter({
+    name: 'drop_checkout_rejections_total',
+    help: 'Checkouts of drop products refused by the drop rules, by reason.',
+    labelNames: ['reason'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

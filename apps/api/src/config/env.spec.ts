@@ -48,6 +48,8 @@ describe('loadEnv', () => {
       razorpayWebhookSecret: '',
       paymentTimeoutSeconds: 900,
       paymentJobsIntervalSeconds: 30,
+      dropStockGate: true,
+      dropStockGateResetSeconds: 10,
     });
   });
 

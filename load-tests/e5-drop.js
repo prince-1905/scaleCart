@@ -48,6 +48,9 @@ const queueCalls = new Counter('queue_calls');
 const timeToOrder = new Trend('time_to_order', true);
 /** From the drop's start to this buyer's pass: time spent in the line. */
 const timeInLine = new Trend('time_in_line', true);
+/** Checkout time by answer: what the Redis stock gate (E6) should change is how fast "sold out" comes back. */
+const checkoutCreatedMs = new Trend('checkout_created_ms', true);
+const checkoutSoldOutMs = new Trend('checkout_sold_out_ms', true);
 
 export const options = {
   setupTimeout: '10m',
@@ -138,9 +141,11 @@ export function buy(data) {
   });
   if (res.status === 201) {
     created.add(1);
+    checkoutCreatedMs.add(res.timings.duration);
     timeToOrder.add(Date.now() - data.startsAt);
   } else if (res.status === 409 && res.json('error') === 'out_of_stock') {
     soldOut.add(1);
+    checkoutSoldOutMs.add(res.timings.duration);
   } else {
     unexpected.add(1);
     console.warn(`checkout: status=${res.status} error=${res.error_code} ${String(res.body).slice(0, 150)}`);

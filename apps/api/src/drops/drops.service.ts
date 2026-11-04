@@ -1,6 +1,7 @@
 import {
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,9 +9,11 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { CatalogService } from '../catalog/catalog.service.js';
 import { isDuplicateKey } from '../database/database.js';
-import { InventoryService } from '../inventory/inventory.service.js';
+import { ENV, type Env } from '../config/env.js';
+import { InventoryService, OutOfStockError } from '../inventory/inventory.service.js';
 import { MetricsService } from '../observability/metrics.service.js';
 import { Drop } from './drop.entities.js';
+import { StockGate } from './stock-gate.js';
 import { PREQUEUE_MS, WaitingRoom, type QueueStatus } from './waiting-room.js';
 
 export interface DropView {
@@ -41,6 +44,8 @@ export interface NewDrop {
 export interface DropClaim {
   dropId: number;
   ticket: number;
+  productId: number;
+  quantity: number;
 }
 
 /** Checkout reads drops on every order: keep them in memory for a few seconds. */
@@ -59,7 +64,9 @@ export class DropsService {
     private readonly catalog: CatalogService,
     private readonly inventory: InventoryService,
     private readonly room: WaitingRoom,
+    private readonly gate: StockGate,
     private readonly metrics: MetricsService,
+    @Inject(ENV) private readonly env: Env,
   ) {}
 
   async create(input: NewDrop): Promise<DropView> {
@@ -116,51 +123,63 @@ export class DropsService {
   }
 
   /**
-   * Called by checkout, before any stock is taken. For every cart line that is a drop
-   * product: the drop has started, the quantity is within the limit, the buyer holds a
-   * valid pass, and this is their first purchase in the drop. The last one is an INSERT
-   * into drop_purchases: the primary key lets one checkout per customer through.
+   * Step 1 of a drop checkout, with no database writes: for every cart line that is a drop
+   * product, the quantity is within the limit and the buyer holds a valid pass (or, without
+   * one, we tell them whether the drop hasn't started or they must queue). Checkout calls
+   * this first, then the Redis door counter, and only then writes anything.
    *
-   * @returns the drops claimed for this order (with the buyer's ticket): give them back with
-   *   releasePurchases() if checkout fails; free the buyer's place with freePlaces() when they're done.
+   * @returns the buyer's drop lines (with their ticket), for takeFromGate() and claimPurchases().
    */
-  async claimPurchases(
+  async checkRules(
     userId: string,
-    orderId: string,
     lines: { productId: number; quantity: number }[],
     pass: string | undefined,
   ): Promise<DropClaim[]> {
     const byProduct = await this.dropsByProduct();
-    const claimed: DropClaim[] = [];
+    const result: DropClaim[] = [];
     const now = Date.now();
-    try {
-      for (const line of lines) {
-        const drop = byProduct.get(line.productId);
-        if (!drop) continue;
-        if (line.quantity > drop.maxPerCustomer) {
-          throw this.reject('drop_limit', 409, `at most ${drop.maxPerCustomer} per customer in "${drop.name}"`);
-        }
-        // A valid pass already proves the drop has started: passes are only issued after the
-        // start. Checking the clock again here could contradict that: in E5 the server clock
-        // jumped back by up to ~1 s every ~27 s, and 39 buyers holding passes were told
-        // "not started". So the clock only decides what to tell someone WITHOUT a pass.
-        const ticket = this.room.checkPass(pass, drop.id, userId, now);
-        if (ticket === null) {
-          if (now < drop.startsAt.getTime()) {
-            throw this.reject('drop_not_started', 409, `"${drop.name}" goes on sale at ${drop.startsAt.toISOString()}`, {
-              startsAt: drop.startsAt.toISOString(),
-            });
-          }
-          throw this.reject('drop_pass_required', 403, `"${drop.name}" needs a waiting-room pass: join the line first`, {
-            dropId: drop.id,
+    for (const line of lines) {
+      const drop = byProduct.get(line.productId);
+      if (!drop) continue;
+      if (line.quantity > drop.maxPerCustomer) {
+        throw this.reject('drop_limit', 409, `at most ${drop.maxPerCustomer} per customer in "${drop.name}"`);
+      }
+      // A valid pass already proves the drop has started: passes are only issued after the
+      // start. Checking the clock again here could contradict that: in E5 the server clock
+      // jumped back by up to ~1 s every ~27 s, and 39 buyers holding passes were told
+      // "not started". So the clock only decides what to tell someone WITHOUT a pass.
+      const ticket = this.room.checkPass(pass, drop.id, userId, now);
+      if (ticket === null) {
+        if (now < drop.startsAt.getTime()) {
+          throw this.reject('drop_not_started', 409, `"${drop.name}" goes on sale at ${drop.startsAt.toISOString()}`, {
+            startsAt: drop.startsAt.toISOString(),
           });
         }
-        await this.claim(drop, userId, orderId);
-        claimed.push({ dropId: drop.id, ticket });
+        throw this.reject('drop_pass_required', 403, `"${drop.name}" needs a waiting-room pass: join the line first`, {
+          dropId: drop.id,
+        });
       }
-      return claimed;
+      result.push({ dropId: drop.id, ticket, productId: line.productId, quantity: line.quantity });
+    }
+    return result;
+  }
+
+  /**
+   * Step 3: "this is their first purchase in the drop", an INSERT into drop_purchases whose
+   * primary key lets one checkout per customer through. All or nothing over the lines.
+   * Give them back with releasePurchases() if checkout fails later.
+   */
+  async claimPurchases(userId: string, orderId: string, claims: DropClaim[]): Promise<void> {
+    if (claims.length === 0) return;
+    const byProduct = await this.dropsByProduct();
+    const done: DropClaim[] = [];
+    try {
+      for (const c of claims) {
+        await this.claim(byProduct.get(c.productId)!, userId, orderId);
+        done.push(c);
+      }
     } catch (err) {
-      await this.releasePurchases(userId, orderId, claimed);
+      await this.releasePurchases(userId, orderId, done);
       throw err;
     }
   }
@@ -174,6 +193,50 @@ export class DropsService {
       orderId,
       dropIds,
     ]);
+  }
+
+  /**
+   * The door counter (Redis) for each drop line, before checkout touches the MySQL stock row.
+   * Throws OutOfStockError when a drop's counter is at 0: that buyer never queues for the row lock.
+   * @returns the lines the gate let through: hand them to returnToGate() if checkout fails later.
+   */
+  async takeFromGate(claims: DropClaim[]): Promise<DropClaim[]> {
+    if (!this.env.dropStockGate) return [];
+    const taken: DropClaim[] = [];
+    for (const c of claims) {
+      const answer = await this.gate.take(c.dropId, c.quantity, async () => (await this.inventory.getAvailable(c.productId)) ?? 0);
+      if (answer === 'sold_out') {
+        await this.returnToGate(taken);
+        throw new OutOfStockError(c.productId);
+      }
+      // 'unavailable' (Redis down): go on to MySQL, which decides anyway.
+      if (answer === 'taken') taken.push(c);
+    }
+    return taken;
+  }
+
+  /** Undo for takeFromGate(): checkout failed after the gate, so those units are back on the shelf. */
+  async returnToGate(taken: DropClaim[]): Promise<void> {
+    await Promise.all(taken.map((c) => this.gate.giveBack(c.dropId, c.quantity)));
+  }
+
+  /**
+   * Sets every live drop's door counter to MySQL's real stock. Catches drift: orders that
+   * expired unpaid (their stock went back in MySQL), admin stock changes, a counter that a
+   * crashed request never gave back. Runs every few seconds on each API replica; repeating it is harmless.
+   */
+  async resetGates(): Promise<number> {
+    if (!this.env.dropStockGate) return 0;
+    const live = await this.db
+      .getRepository(Drop)
+      .createQueryBuilder('d')
+      .where('d.startsAt BETWEEN :from AND :to', {
+        from: new Date(Date.now() - 24 * 3600_000),
+        to: new Date(Date.now() + PREQUEUE_MS),
+      })
+      .getMany();
+    for (const d of live) await this.gate.reset(d.id, (await this.inventory.getAvailable(d.productId)) ?? 0);
+    return live.length;
   }
 
   /** The buyer is done (bought, or sold out): their place at the counter goes to the next ticket. */

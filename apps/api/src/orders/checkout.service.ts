@@ -148,35 +148,47 @@ export class CheckoutService {
     const lines = await this.cart.getLines(userId);
     if (lines.length === 0) throw new BadRequestException('cart is empty');
 
-    const products = await this.catalog.getByIds(lines.map((l) => l.productId));
-    const items = lines.map((l) => {
-      const p = products.get(l.productId);
-      if (!p) throw new ConflictException(`product ${l.productId} is no longer sold`);
-      return {
-        productId: p.id,
-        sku: p.sku,
-        name: p.name,
-        unitPriceCents: p.priceCents,
-        quantity: l.quantity,
-      };
-    });
-    const totalCents = items.reduce((sum, i) => sum + i.unitPriceCents * i.quantity, 0);
-    if (dto.expectedTotalCents !== undefined && dto.expectedTotalCents !== totalCents) {
-      throw new ConflictException({
-        statusCode: 409,
-        error: 'price_changed',
-        message: 'the cart total changed since it was shown; review the cart and retry',
-        totalCents,
-      });
-    }
-
-    // Drop rules (started, per-customer limit, waiting-room pass, first purchase) before
-    // any stock is taken: a refused drop checkout costs a few cheap checks, no locks.
-    const drops = await this.drops.claimPurchases(userId, orderId, lines, dto.dropPass);
+    // Drops first, before any other database work. The rules (limit, pass) need no database,
+    // and the Redis door counter answers "sold out" in about a millisecond. In E6 the counter
+    // sat after pricing and the purchase INSERT, so every sold-out buyer still made two MySQL
+    // writes, and "sold out" was no faster than a real purchase.
+    const drops = await this.drops.checkRules(userId, lines, dto.dropPass);
+    let gated: DropClaim[] = [];
+    let claimed = false;
+    let items: OrderView['items'];
+    let totalCents: number;
     try {
+      gated = await this.drops.takeFromGate(drops);
+
+      const products = await this.catalog.getByIds(lines.map((l) => l.productId));
+      items = lines.map((l) => {
+        const p = products.get(l.productId);
+        if (!p) throw new ConflictException(`product ${l.productId} is no longer sold`);
+        return {
+          productId: p.id,
+          sku: p.sku,
+          name: p.name,
+          unitPriceCents: p.priceCents,
+          quantity: l.quantity,
+        };
+      });
+      totalCents = items.reduce((sum, i) => sum + i.unitPriceCents * i.quantity, 0);
+      if (dto.expectedTotalCents !== undefined && dto.expectedTotalCents !== totalCents) {
+        throw new ConflictException({
+          statusCode: 409,
+          error: 'price_changed',
+          message: 'the cart total changed since it was shown; review the cart and retry',
+          totalCents,
+        });
+      }
+
+      // One purchase per customer per drop (a primary key), then the stock: MySQL decides.
+      await this.drops.claimPurchases(userId, orderId, drops);
+      claimed = true;
       await this.inventory.reserve(orderId, lines);
     } catch (err) {
-      await this.releaseDrops(userId, orderId, drops); // e.g. sold out: they didn't buy, so they may try again
+      await this.returnToGate(gated);
+      if (claimed) await this.releaseDrops(userId, orderId, drops); // e.g. sold out: they didn't buy, so they may try again
       if (err instanceof OutOfStockError) await this.freePlaces(drops); // nothing left to wait for: next in line
       throw err;
     }
@@ -233,6 +245,7 @@ export class CheckoutService {
           this.logger.error({ err: e, orderId }, 'COMPENSATION FAILED: stock stays reserved'),
         );
         await this.releaseDrops(userId, orderId, drops);
+        await this.returnToGate(gated);
       }
       throw err;
     }
@@ -284,6 +297,12 @@ export class CheckoutService {
     return takeover.affectedRows === 1
       ? { kind: 'claimed', orderId: existing.orderId }
       : { kind: 'in_progress' };
+  }
+
+  private async returnToGate(gated: DropClaim[]) {
+    if (gated.length === 0) return;
+    // If this fails, the counter stays a little low until the next reset (we'd sell fewer for a moment, never more).
+    await this.drops.returnToGate(gated).catch((e) => this.logger.warn({ err: e }, 'could not give units back to the stock gate'));
   }
 
   private async freePlaces(drops: DropClaim[]) {

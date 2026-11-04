@@ -96,6 +96,10 @@ export interface Env {
   paymentTimeoutSeconds: number;
   /** How often the worker expires overdue orders and sends pending refunds. */
   paymentJobsIntervalSeconds: number;
+  /** A Redis "door counter" in front of each drop's MySQL stock row. Off = every buyer goes to MySQL (experiment E6). */
+  dropStockGate: boolean;
+  /** How often each API replica resets the drop counters from MySQL. */
+  dropStockGateResetSeconds: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -204,6 +208,8 @@ export function loadEnv(
     razorpayWebhookSecret: source.RAZORPAY_WEBHOOK_SECRET ?? '',
     paymentTimeoutSeconds: positiveInt(source, 'PAYMENT_TIMEOUT_SECONDS', 900),
     paymentJobsIntervalSeconds: positiveInt(source, 'PAYMENT_JOBS_INTERVAL_SECONDS', 30),
+    dropStockGate: bool(source.DROP_STOCK_GATE, true),
+    dropStockGateResetSeconds: positiveInt(source, 'DROP_STOCK_GATE_RESET_SECONDS', 10),
   };
 }
 

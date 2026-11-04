@@ -20,6 +20,18 @@
          It only knows this store's catalog and only touches <em>your</em> cart and orders.</p>
     </section>
 
+    <!-- Drops: visible to everyone; joining the line needs a login. -->
+    <section id="drops" class="panel">
+      <div class="panel-head">
+        <h2>Drops</h2>
+        <button id="refresh-drops" class="link">Refresh</button>
+      </div>
+      <ul id="drop-list" class="drop-list"></ul>
+      <p class="hint">A drop opens at a set time. Join the line up to 10 minutes early and you get a ticket number;
+         numbers are called at a fixed rate. When yours is called you have 5 minutes to buy. The server enforces all of
+         this: the countdown is only a display (it uses the server's clock, not yours).</p>
+    </section>
+
     <!-- Shown when logged out -->
     <form id="login" class="panel">
       <h2>Log in</h2>
@@ -56,6 +68,18 @@
 
     <!-- Shown to admins only. The API enforces this too: hiding a panel is not security. -->
     <section id="admin" class="panel" hidden>
+      <h2>Create a drop</h2>
+      <form id="drop-form">
+        <label>Product ID <input id="drop-product" type="number" min="1" required></label>
+        <label>Starts in (minutes) <input id="drop-minutes" type="number" min="0" max="1440" value="2" required></label>
+        <label>Buyers let in per second <input id="drop-rate" type="number" min="1" max="10000" value="1" required></label>
+        <label>Or: max shoppers at once ("one out, one in"; empty = use the rate above)
+          <input id="drop-shoppers" type="number" min="1" max="10000"></label>
+        <label>Max per customer <input id="drop-max" type="number" min="1" max="10" value="1" required></label>
+        <button type="submit">Create drop</button>
+      </form>
+      <p id="drop-form-status" class="hint" hidden></p>
+
       <h2>Generate product copy with AI</h2>
       <form id="copy-request">
         <label>Product name <input id="copy-name" required minlength="2" maxlength="200"></label>

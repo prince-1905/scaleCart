@@ -12,6 +12,7 @@ import { loggerModule } from './observability/logger.js';
 import { ObservabilityModule } from './observability/observability.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
+import { DropsModule } from './drops/drops.module.js';
 
 @Module({})
 export class AppModule {
@@ -29,6 +30,7 @@ export class AppModule {
         CartModule,
         OrdersModule,
         PaymentsModule,
+        DropsModule,
         AiModule,
         ...(env.labEndpoints ? [LabModule] : []),
       ],

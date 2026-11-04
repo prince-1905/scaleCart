@@ -15,6 +15,7 @@ import { CatalogService } from '../catalog/catalog.service.js';
 import { uuidv7 } from '../common/uuid.js';
 import { ENV, type Env, type NotifyMode } from '../config/env.js';
 import { isDuplicateKey, type WriteResult } from '../database/database.js';
+import { DropsService, type DropClaim } from '../drops/drops.service.js';
 import { UserDirectory } from '../identity/user-directory.js';
 import { InventoryService, OutOfStockError } from '../inventory/inventory.service.js';
 import { MailerService } from '../notifications/mailer.service.js';
@@ -83,13 +84,16 @@ export class CheckoutService {
     private readonly metrics: MetricsService,
     private readonly users: UserDirectory,
     private readonly mailer: MailerService,
+    private readonly drops: DropsService,
     @Inject(ENV) env: Env,
   ) {
     this.notifyMode = env.notifyMode;
   }
 
   async checkout(userId: string, key: string, dto: CheckoutDto): Promise<CheckoutResult> {
-    const claim = await this.claim(userId, key, sha256(JSON.stringify(dto)));
+    // The waiting-room pass is left out of the fingerprint: a retry may carry a freshly issued pass.
+    const { dropPass: _pass, ...request } = dto;
+    const claim = await this.claim(userId, key, sha256(JSON.stringify(request)));
     switch (claim.kind) {
       case 'replay':
         this.count('replayed');
@@ -166,7 +170,16 @@ export class CheckoutService {
       });
     }
 
-    await this.inventory.reserve(orderId, lines);
+    // Drop rules (started, per-customer limit, waiting-room pass, first purchase) before
+    // any stock is taken: a refused drop checkout costs a few cheap checks, no locks.
+    const drops = await this.drops.claimPurchases(userId, orderId, lines, dto.dropPass);
+    try {
+      await this.inventory.reserve(orderId, lines);
+    } catch (err) {
+      await this.releaseDrops(userId, orderId, drops); // e.g. sold out: they didn't buy, so they may try again
+      if (err instanceof OutOfStockError) await this.freePlaces(drops); // nothing left to wait for: next in line
+      throw err;
+    }
 
     const order: OrderView = {
       id: orderId,
@@ -219,9 +232,12 @@ export class CheckoutService {
         await this.inventory.release(orderId).catch((e) =>
           this.logger.error({ err: e, orderId }, 'COMPENSATION FAILED: stock stays reserved'),
         );
+        await this.releaseDrops(userId, orderId, drops);
       }
       throw err;
     }
+    // Bought: this buyer's place at the counter goes to the next ticket ("one out, one in").
+    await this.freePlaces(drops);
 
     if (this.notifyMode === 'sync') {
       // LAB ONLY (experiment E3): the "obvious" way. The customer waits for the mail
@@ -268,6 +284,19 @@ export class CheckoutService {
     return takeover.affectedRows === 1
       ? { kind: 'claimed', orderId: existing.orderId }
       : { kind: 'in_progress' };
+  }
+
+  private async freePlaces(drops: DropClaim[]) {
+    if (drops.length === 0) return;
+    await this.drops.freePlaces(drops).catch((e) =>
+      this.logger.warn({ err: e }, 'could not free waiting-room places: they free themselves when the lease ends'),
+    );
+  }
+
+  private async releaseDrops(userId: string, orderId: string, drops: DropClaim[]) {
+    await this.drops.releasePurchases(userId, orderId, drops).catch((e) =>
+      this.logger.error({ err: e, orderId }, 'could not release drop purchase claims: the customer cannot retry this drop'),
+    );
   }
 
   private async releaseClaim(userId: string, key: string) {

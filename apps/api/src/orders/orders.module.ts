@@ -5,6 +5,7 @@ import { UsersModule } from '../identity/users.module.js';
 import { InventoryModule } from '../inventory/inventory.module.js';
 import { MailerModule } from '../notifications/mailer.module.js';
 import { ObservabilityModule } from '../observability/observability.module.js';
+import { DropsCoreModule } from '../drops/drops-core.module.js';
 import { CheckoutService } from './checkout.service.js';
 import { OrdersCoreModule } from './orders-core.module.js';
 import { OrdersController } from './orders.controller.js';
@@ -15,6 +16,7 @@ import { OrdersController } from './orders.controller.js';
     CartModule,
     CatalogModule,
     InventoryModule,
+    DropsCoreModule,
     ObservabilityModule,
     // Only used by the lab's NOTIFY_MODE=sync; normally email goes through the outbox.
     UsersModule,

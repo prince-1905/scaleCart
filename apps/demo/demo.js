@@ -79,6 +79,9 @@ function logout(message) {
   $('who').hidden = true;
   $('logout').hidden = true;
   setChatEnabled(false);
+  for (const state of lines.values()) clearTimeout(state.timer);
+  lines.clear();
+  renderDrops();
   if (message) {
     $('login-error').textContent = message;
     $('login-error').hidden = false;
@@ -96,6 +99,7 @@ function showLoggedIn() {
   $('logout').hidden = false;
   setChatEnabled(true);
   refreshCart();
+  renderDrops(); // the Join buttons need a login
 }
 
 async function refreshCart() {
@@ -115,6 +119,155 @@ async function refreshCart() {
   $('cart-total').textContent = inr(cart.totalCents / 100);
   $('checkout').disabled = cart.items.length === 0;
 }
+
+// ---------- drops and the waiting room ----------
+
+let drops = [];
+let clockOffsetMs = 0; // server clock minus this browser's clock
+const lines = new Map(); // dropId → { status, timer } for drops this visitor has joined
+
+const serverNow = () => Date.now() + clockOffsetMs;
+
+function formatCountdown(ms) {
+  if (ms <= 0) return 'live now';
+  const s = Math.ceil(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `starts in ${h ? `${h}:` : ''}${pad(m)}:${pad(s % 60)}`;
+}
+
+async function refreshDrops() {
+  const res = await fetch('/drops');
+  if (!res.ok) return;
+  drops = await res.json();
+  if (drops.length) clockOffsetMs = Date.parse(drops[0].serverTime) - Date.now();
+  renderDrops();
+}
+
+function renderDrops() {
+  const list = $('drop-list');
+  list.replaceChildren();
+  if (drops.length === 0) list.append(el('li', 'empty', 'No drops right now.'));
+  for (const drop of drops) {
+    const li = el('li', 'drop');
+    li.dataset.dropId = drop.id;
+    const head = el('div', 'drop-head');
+    head.append(
+      el('strong', '', drop.name),
+      el('span', '', `${inr(drop.product.priceCents / 100)} · ${drop.available ?? '?'} left · max ${drop.maxPerCustomer} each`),
+    );
+    const countdown = el('span', 'countdown');
+    countdown.dataset.startsAt = drop.startsAt;
+    const line = el('div', 'line');
+    li.append(head, countdown, line);
+    list.append(li);
+    renderLine(drop);
+  }
+  tickCountdowns();
+}
+
+function tickCountdowns() {
+  for (const span of document.querySelectorAll('.countdown')) {
+    span.textContent = formatCountdown(Date.parse(span.dataset.startsAt) - serverNow());
+  }
+}
+setInterval(tickCountdowns, 1000);
+
+/** The line part of one drop: a Join button, your ticket and place, or Buy now. */
+function renderLine(drop) {
+  const box = document.querySelector(`li[data-drop-id="${drop.id}"] .line`);
+  if (!box) return;
+  box.replaceChildren();
+  const state = lines.get(drop.id);
+  if (!token) {
+    box.append(el('span', 'hint', 'Log in to join the line.'));
+  } else if (!state) {
+    const join = el('button', 'join', 'Join the line');
+    join.addEventListener('click', () => joinLine(drop));
+    box.append(join);
+  } else if (state.error) {
+    box.append(el('span', 'error', state.error));
+  } else if (!state.status.admitted) {
+    const s = state.status;
+    box.append(el('span', '', `🎟 Ticket #${s.ticket} · ${s.position} ahead of you · about ${s.etaSeconds} s`));
+  } else {
+    const until = new Date(state.status.passExpiresAt).toLocaleTimeString();
+    const buy = el('button', 'join', 'Buy now');
+    buy.addEventListener('click', () => buyDrop(drop, state.status.pass));
+    box.append(el('span', '', `✅ Your turn! Buy before ${until}. `), buy);
+  }
+}
+
+/** Joins the line (or asks where we are), then asks again when the estimate says our turn is near. */
+async function joinLine(drop) {
+  const state = lines.get(drop.id) ?? {};
+  clearTimeout(state.timer);
+  const res = await api(`/drops/${drop.id}/queue`, { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const retry = res.status === 503; // waiting room briefly unavailable: try again
+    lines.set(drop.id, { error: errorMessage(body, res.status), timer: retry ? setTimeout(() => joinLine(drop), 3000) : undefined });
+  } else {
+    const next = body.admitted ? undefined : setTimeout(() => joinLine(drop), Math.min(5, Math.max(1, body.etaSeconds)) * 1000);
+    lines.set(drop.id, { status: body, timer: next });
+  }
+  renderLine(drop);
+}
+
+async function buyDrop(drop, pass) {
+  setPayStatus(`Buying ${drop.name}…`);
+  // The drop product only; whatever else is in the cart stays for a normal checkout.
+  const cart = await api(`/cart/items/${drop.product.id}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ quantity: 1 }),
+  });
+  if (!cart.ok) {
+    setPayStatus(errorMessage(await cart.json().catch(() => ({})), cart.status), true);
+    return;
+  }
+  checkoutKey ??= crypto.randomUUID();
+  const res = await api('/checkout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': checkoutKey },
+    body: JSON.stringify({ dropPass: pass }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    setPayStatus(errorMessage(body, res.status), true);
+    if (res.status !== 409) return;
+    checkoutKey = null; // a definite "no" (sold out, already bought): the next try is a new attempt
+    refreshDrops();
+    return;
+  }
+  checkoutKey = null;
+  lines.delete(drop.id);
+  await Promise.all([refreshCart(), refreshOrders(), refreshDrops()]);
+  await pay(body.id);
+}
+
+$('refresh-drops').addEventListener('click', () => refreshDrops());
+
+$('drop-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const startsAt = new Date(serverNow() + Number($('drop-minutes').value) * 60_000).toISOString();
+  const res = await api('/drops', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      productId: Number($('drop-product').value),
+      startsAt,
+      admitPerSecond: Number($('drop-rate').value),
+      maxPerCustomer: Number($('drop-max').value),
+      ...($('drop-shoppers').value ? { maxShoppers: Number($('drop-shoppers').value) } : {}),
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  $('drop-form-status').hidden = false;
+  $('drop-form-status').textContent = res.ok ? `Drop #${body.id} created: ${body.name}` : errorMessage(body, res.status);
+  if (res.ok) refreshDrops();
+});
 
 // ---------- checkout and payment (Razorpay test mode) ----------
 
@@ -565,3 +718,4 @@ if (token) {
   showRedirectResult();
 }
 else logout();
+refreshDrops();

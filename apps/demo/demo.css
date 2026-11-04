@@ -105,3 +105,12 @@ input, select, textarea { font: inherit; }
 .chat-form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 .chat-form input { flex: 1; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .chat-form button:disabled, .chat-form input:disabled { opacity: .5; cursor: default; }
+
+/* Drops */
+.drop-list { list-style: none; padding: 0; margin: 0; }
+.drop { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; display: grid; gap: 6px; }
+.drop-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.countdown { font-variant-numeric: tabular-nums; color: var(--brand); font-weight: 600; }
+.line { font-size: 14px; }
+.join, #drop-form button[type=submit] { background: var(--brand); color: #fff; border: none; border-radius: 8px; padding: 8px 14px; }
+#drop-form input { width: 100%; }

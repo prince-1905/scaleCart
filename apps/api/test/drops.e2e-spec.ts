@@ -1,10 +1,12 @@
 import type { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { DropPassSigner } from '../src/drops/drop-pass.js';
+import { DropsService } from '../src/drops/drops.service.js';
 import {
   createProduct,
   dataSource,
   http,
+  metric,
   registerAdmin,
   registerUser,
   startApp,
@@ -97,10 +99,12 @@ describe('drops and the waiting room', () => {
   });
 
   it('the line moves at the admit rate: first ticket called, second still waiting', async () => {
-    // Started 1.5 s ago at 1 ticket per second: tickets 1 called, 2 waits.
-    const { dropId } = await newDrop({ startsInMs: -1_500, admitPerSecond: 1 });
-    const first = (await queue(await registerUser(app), dropId)).body;
-    const second = (await queue(await registerUser(app), dropId)).body;
+    // Started 1.1 s ago at 1 ticket per second: ticket 1 is called, ticket 2 waits until the 2 s mark.
+    // Users are registered first (Argon2 is slow), so both queue calls land well inside that window.
+    const [u1, u2] = await Promise.all([registerUser(app), registerUser(app)]);
+    const { dropId } = await newDrop({ startsInMs: -1_100, admitPerSecond: 1 });
+    const first = (await queue(u1, dropId)).body;
+    const second = (await queue(u2, dropId)).body;
     expect(first).toMatchObject({ ticket: 1, admitted: true, position: 0 });
     expect(first.pass).toEqual(expect.any(String));
     expect(second).toMatchObject({ ticket: 2, admitted: false, position: 1, etaSeconds: 1 });
@@ -219,6 +223,55 @@ describe('drops and the waiting room', () => {
     it('before the start, nobody is called', async () => {
       const { dropId } = await newDrop({ startsInMs: 60_000, maxShoppers: 5 });
       expect((await queue(await registerUser(app), dropId)).body).toMatchObject({ ticket: 1, admitted: false, admittedUpTo: 0 });
+    });
+  });
+
+  describe('the Redis door counter (stock gate)', () => {
+    const gateCount = (result: string) => metric(app, new RegExp(`drop_stock_gate_total\\{result="${result}"\\} (\\d+)`));
+
+    it('once it reaches 0, buyers get "sold out" without going to the MySQL stock row', async () => {
+      const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 2 });
+      const buyers = await Promise.all([registerUser(app), registerUser(app), registerUser(app)]);
+      const soldOutBefore = await gateCount('sold_out');
+
+      for (const b of buyers.slice(0, 2)) expect((await buy(b, productId, (await queue(b, dropId)).body.pass)).status).toBe(201);
+      const pass = (await queue(buyers[2], dropId)).body.pass;
+
+      // Jam the MySQL stock row (like a stuck commit). Without the gate, the third checkout would
+      // wait for this lock; with it, "sold out" comes back without touching the row.
+      const jam = dataSource(app, 'inventory').createQueryRunner();
+      await jam.connect();
+      await jam.startTransaction();
+      await jam.query('SELECT available FROM stock WHERE product_id = ? FOR UPDATE', [productId]);
+      const started = performance.now();
+      const third = await buy(buyers[2], productId, pass);
+      const ms = performance.now() - started;
+      await jam.rollbackTransaction();
+      await jam.release();
+
+      expect(third.status).toBe(409);
+      expect(third.body.error).toBe('out_of_stock');
+      expect(ms).toBeLessThan(2_000);
+      expect(await gateCount('sold_out')).toBe(soldOutBefore + 1);
+    });
+
+    it('a wrong counter still cannot oversell (MySQL decides), and the reset corrects it', async () => {
+      const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 5 });
+      const [a, b, c] = await Promise.all([registerUser(app), registerUser(app), registerUser(app)]);
+      expect((await buy(a, productId, (await queue(a, dropId)).body.pass)).status).toBe(201); // counter: 4
+
+      // Stock changes behind the counter's back: MySQL now says 0, the counter still says 4.
+      await http(app).put(`/inventory/${productId}`).auth(admin.accessToken, { type: 'bearer' }).send({ available: 0 }).expect(200);
+      const takenBefore = await gateCount('taken');
+      const second = await buy(b, productId, (await queue(b, dropId)).body.pass);
+      expect(second.body.error).toBe('out_of_stock'); // the gate let b try; MySQL said no
+      expect(await gateCount('taken')).toBe(takenBefore + 1);
+
+      await app.get(DropsService).resetGates(); // counter := MySQL's 0
+      const soldOutBefore = await gateCount('sold_out');
+      expect((await buy(c, productId, (await queue(c, dropId)).body.pass)).body.error).toBe('out_of_stock');
+      expect(await gateCount('sold_out')).toBe(soldOutBefore + 1); // answered by the gate this time
+      expect((await http(app).get(`/inventory/${productId}`)).body.available).toBe(0);
     });
   });
 

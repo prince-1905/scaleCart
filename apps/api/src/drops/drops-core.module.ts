@@ -6,12 +6,13 @@ import { InventoryCoreModule } from '../inventory/inventory-core.module.js';
 import { ObservabilityModule } from '../observability/observability.module.js';
 import { dropsDatabase } from './drops.database.js';
 import { DropsService } from './drops.service.js';
+import { StockGate } from './stock-gate.js';
 import { WaitingRoom } from './waiting-room.js';
 
 /** Drops and the waiting room without HTTP: checkout (orders module) uses DropsService. */
 @Module({
   imports: [...moduleTypeOrm(dropsDatabase), CatalogModule, InventoryCoreModule, CacheModule, ObservabilityModule],
-  providers: [DropsService, WaitingRoom],
+  providers: [DropsService, WaitingRoom, StockGate],
   exports: [DropsService],
 })
 export class DropsCoreModule {}

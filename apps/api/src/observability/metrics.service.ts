@@ -173,6 +173,14 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  /** The Redis door counter: taken (may try MySQL), sold_out (answered without MySQL), unavailable (Redis down: straight to MySQL). */
+  readonly dropStockGate = new Counter({
+    name: 'drop_stock_gate_total',
+    help: 'Drop checkouts by what the Redis stock counter answered.',
+    labelNames: ['result'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

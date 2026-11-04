@@ -50,6 +50,8 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   JWT_SECRET: 'test-only-secret-0123456789abcdefghijklmnop',
   HTTP_ACCESS_LOG: 'false',
   LOG_LEVEL: 'silent',
+  // Tests reset the drop counters themselves (resetGates), never on a timer in the middle of a test.
+  DROP_STOCK_GATE_RESET_SECONDS: '3600',
 };
 
 export async function startApp(

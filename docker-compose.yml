@@ -199,6 +199,8 @@ services:
       RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
       RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
+      # Drops (Phase 4.6): Redis "door counter" in front of the MySQL stock row. false = every buyer goes to MySQL (E6).
+      DROP_STOCK_GATE: ${DROP_STOCK_GATE:-true}
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:

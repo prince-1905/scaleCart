@@ -391,10 +391,13 @@ in 58 ms; the expiry job cleared 39,807 abandoned orders in ~8 min.
       time-based:        tickets ≤ seconds since start × admitPerSecond   (pure arithmetic, no job)
       "one out, one in": at most maxShoppers called at once; a place frees when one buys / sells out / 60 s pass
  3. Called → a signed pass (HMAC: drop, user, ticket, expiry)
- 4. Checkout {dropPass} → before ANY stock is touched:
-      quantity ≤ maxPerCustomer · valid pass (or: not started yet → 409) · INSERT drop_purchases (drop, user)
-      primary key = one purchase per customer · then the normal checkout (reserve stock, order, outbox)
-    Redis down → the line answers 503 (fail closed); stock is in MySQL, so it can't oversell.
+ 4. Checkout {dropPass}, in this order (cheapest first):
+      a. quantity ≤ maxPerCustomer · valid pass (or: not started yet → 409)            no database
+      b. Redis door counter: "take 1 if ≥ 1 left" (Lua) → at 0: "sold out", MySQL never touched
+      c. prices · INSERT drop_purchases (drop, user): primary key = one purchase per customer
+      d. the normal checkout: reserve stock (MySQL decides), order, outbox
+    Redis down → the line answers 503 (fail closed), the counter is skipped (fail open);
+    stock is decided in MySQL either way, so it can't oversell. The counter is reset from MySQL every 10 s.
 ```
 
 **Analogy:** a bank's token machine. Everyone takes a number; the screen calls numbers at the speed the counters can

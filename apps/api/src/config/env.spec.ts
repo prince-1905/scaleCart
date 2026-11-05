@@ -50,6 +50,8 @@ describe('loadEnv', () => {
       paymentJobsIntervalSeconds: 30,
       dropStockGate: true,
       dropStockGateResetSeconds: 10,
+      shutdownDrainSeconds: 5,
+      httpMaxRequestsPerSocket: 0,
     });
   });
 

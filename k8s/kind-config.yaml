@@ -1,0 +1,12 @@
+# A one-node Kubernetes cluster inside Docker (kind), for the laptop.
+#   kind create cluster --name scalecart --config k8s/kind-config.yaml   (k8s/up.ps1 does this)
+# The API's NodePort 30080 is published on the host as http://localhost:8089
+# (8088 stays with the Docker Compose stack, 8080 is taken by the Oracle listener).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8089
+        protocol: TCP

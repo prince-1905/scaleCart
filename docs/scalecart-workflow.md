@@ -440,6 +440,24 @@ who can't enter the stockroom. They hand a slip to the clerk, who checks it befo
 Every round and every tool call (name, inputs, result, time) is written to the API log:
 `docker compose logs -f api`. Full details are in [AI_LEARNING.md](AI_LEARNING.md).
 
+### M. Running on Kubernetes (Phase 7-light)
+
+`./k8s/up.ps1` creates a one-node cluster (kind), loads the image, makes a Secret from `.env`, starts MySQL, Redis, RabbitMQ
+and Mailpit, runs the migrate and seed Jobs, then the API and the worker. API: http://localhost:8089.
+
+```
+ Deployment "api": 1–4 pods (HPA: +pods when average CPU > 60% of the 500m request)
+   startup/liveness /health/live (checks nothing external) · readiness /health/ready (pings the databases)
+   rolling update: a new pod is ready before an old one stops
+   stopping pod: preStop 5 s → SIGTERM → drain 5 s (keeps serving, says "Connection: close" + not ready) → close
+   every connection closes after 500 requests, so clients spread onto newly added pods
+ MySQL connections: pods × 7 module pools × DB_POOL_SIZE (2) + worker must stay under 151
+```
+
+**Measured (E7):** rolling restart at 200 req/s: 27–67 failed requests without shutdown handling, 0 with the drain (6/6).
+New pods got almost no traffic until connections were recycled. 5 pods at pool size 5 exhausted MySQL (761 of 1,000
+checkouts failed); at pool size 2, 5 pods use 72–75 connections.
+
 ---
 
 ## 6. How we watch it (observability)
@@ -465,7 +483,8 @@ Every round and every tool call (name, inputs, result, time) is written to the A
 | Stable webhook URL | Webhooks reach the laptop through a cloudflared quick tunnel whose address changes every run | a real deployment |
 | "Your turn" push | The waiting room makes browsers ask "my turn?" every 0.5–5 s; in "one out, one in" mode freed places sit empty until then (line ~23/s instead of 50/s, E5b) | later (SSE / WebSocket) |
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
-| Autoscaling | Copies are added by hand (`API_REPLICAS=4`) | Kubernetes phase |
+| Shared DB connections (ProxySQL) | Each pod has its own pools (7 × 2 connections); the pod count is capped by a connection budget (E7c) | next small phase |
+| Waiting-room drop cache | `POST /drops/:id/queue` reads the drop from MySQL on every call; 2 calls got 500 (connect timeout) with 5 pods (E7c) | small fix |
 | Demo website | Drops with countdown + waiting room, cart, checkout + Razorpay payment, orders, AI chat, admin product copy and drops (http://localhost:8088/demo/) | product pages, later |
 | 2FA, microservices, tracing | – | later |
 

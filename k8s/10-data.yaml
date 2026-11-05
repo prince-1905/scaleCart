@@ -1,0 +1,174 @@
+# The stateful services, the same images and settings as docker-compose.yml, sized for a laptop.
+# Passwords come from the Secret `scalecart-secrets`, which k8s/up.ps1 creates from .env (never committed).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init
+  namespace: scalecart
+data:
+  # Same as infra/mysql/init/01-grants.sql: the app may own scalecart_* databases, nothing else.
+  01-grants.sql: |
+    GRANT ALL PRIVILEGES ON `scalecart\_%`.* TO 'scalecart'@'%';
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: scalecart
+spec:
+  selector: { app: mysql }
+  ports: [{ port: 3306 }]
+---
+# A StatefulSet, not a Deployment: a stable name (mysql-0) and its own disk that survives restarts.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: scalecart
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector: { matchLabels: { app: mysql } }
+  template:
+    metadata: { labels: { app: mysql } }
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4.13
+          args: ["--innodb-buffer-pool-size=256M"]
+          env:
+            - { name: MYSQL_USER, value: scalecart }
+            - name: MYSQL_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: DB_PASSWORD } }
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: MYSQL_ROOT_PASSWORD } }
+          ports: [{ containerPort: 3306 }]
+          readinessProbe:
+            exec: { command: ["mysqladmin", "ping", "-h", "127.0.0.1", "--silent"] }
+            periodSeconds: 3
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: "2", memory: 768Mi }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mysql }
+            - { name: init, mountPath: /docker-entrypoint-initdb.d, readOnly: true }
+      volumes:
+        - name: init
+          configMap: { name: mysql-init }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 2Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: scalecart
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379 }]
+---
+# Pure memory (cache, tickets, counters): no disk needed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: scalecart
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis } }
+    spec:
+      containers:
+        - name: redis
+          image: redis:8.8.2-alpine
+          args: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+          ports: [{ containerPort: 6379 }]
+          readinessProbe:
+            exec: { command: ["redis-cli", "ping"] }
+            periodSeconds: 3
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 192Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: scalecart
+spec:
+  selector: { app: rabbitmq }
+  ports: [{ name: amqp, port: 5672 }, { name: ui, port: 15672 }]
+---
+# RabbitMQ keeps its data per node name, and a StatefulSet's pod name (rabbitmq-0) is stable.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: scalecart
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector: { matchLabels: { app: rabbitmq } }
+  template:
+    metadata: { labels: { app: rabbitmq } }
+    spec:
+      # The image runs as uid 100 / gid 101. Without this, a brand-new volume is root-owned and the very first
+      # start crashed reading .erlang.cookie (eacces), then worked on the automatic restart.
+      securityContext: { runAsUser: 100, runAsGroup: 101, fsGroup: 101 }
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:4.3.7-management-alpine
+          env:
+            - { name: RABBITMQ_DEFAULT_USER, value: scalecart }
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: RABBITMQ_PASSWORD } }
+          ports: [{ containerPort: 5672 }, { containerPort: 15672 }]
+          readinessProbe:
+            exec: { command: ["rabbitmq-diagnostics", "-q", "ping"] }
+            periodSeconds: 10
+            timeoutSeconds: 8
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts: [{ name: data, mountPath: /var/lib/rabbitmq }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: scalecart
+spec:
+  selector: { app: mailpit }
+  ports: [{ name: smtp, port: 1025 }, { name: ui, port: 8025 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  namespace: scalecart
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: mailpit } }
+  template:
+    metadata: { labels: { app: mailpit } }
+    spec:
+      containers:
+        - name: mailpit
+          image: axllent/mailpit:v1.31.4
+          env:
+            - { name: MP_MAX_MESSAGES, value: "0" }
+            - { name: MP_SMTP_AUTH_ACCEPT_ANY, value: "1" }
+            - { name: MP_SMTP_AUTH_ALLOW_INSECURE, value: "1" }
+          ports: [{ containerPort: 1025 }, { containerPort: 8025 }]
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }

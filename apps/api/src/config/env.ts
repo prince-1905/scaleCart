@@ -100,6 +100,10 @@ export interface Env {
   dropStockGate: boolean;
   /** How often each API replica resets the drop counters from MySQL. */
   dropStockGateResetSeconds: number;
+  /** On SIGTERM, keep serving this long with "Connection: close" before closing (graceful drain, E7a). */
+  shutdownDrainSeconds: number;
+  /** Close a keep-alive connection after this many requests, so load spreads to new pods (E7b). 0 = no limit. */
+  httpMaxRequestsPerSocket: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -111,6 +115,15 @@ function positiveInt(source: NodeJS.ProcessEnv, name: string, fallback: number):
   const raw = source[name];
   const value = raw === undefined || raw === '' ? fallback : Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`Invalid ${name}: ${raw}`);
+  }
+  return value;
+}
+
+function nonNegativeInt(source: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = source[name];
+  const value = raw === undefined || raw === '' ? fallback : Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
     throw new Error(`Invalid ${name}: ${raw}`);
   }
   return value;
@@ -210,6 +223,8 @@ export function loadEnv(
     paymentJobsIntervalSeconds: positiveInt(source, 'PAYMENT_JOBS_INTERVAL_SECONDS', 30),
     dropStockGate: bool(source.DROP_STOCK_GATE, true),
     dropStockGateResetSeconds: positiveInt(source, 'DROP_STOCK_GATE_RESET_SECONDS', 10),
+    shutdownDrainSeconds: nonNegativeInt(source, 'SHUTDOWN_DRAIN_SECONDS', 5),
+    httpMaxRequestsPerSocket: nonNegativeInt(source, 'HTTP_MAX_REQUESTS_PER_SOCKET', 0),
   };
 }
 

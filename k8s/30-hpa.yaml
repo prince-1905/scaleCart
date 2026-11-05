@@ -1,0 +1,24 @@
+# Autoscaling (HorizontalPodAutoscaler): more API pods when they're busy, fewer when quiet.
+# Needs metrics-server (pod CPU usage). "60%" is of the pod's CPU *request* (500m), i.e. ~0.3 core.
+# Max 4: this is one laptop (E2: 4 × 1 CPU already pushed the host to ~96%).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+  namespace: scalecart
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api }
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 60 }
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0     # react to a rush at once
+      policies: [{ type: Pods, value: 2, periodSeconds: 15 }]
+    scaleDown:
+      stabilizationWindowSeconds: 120   # wait 2 min of calm before removing pods (no flapping)
+      policies: [{ type: Pods, value: 1, periodSeconds: 30 }]

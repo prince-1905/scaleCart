@@ -1,0 +1,27 @@
+# Demo and load-test data (admin, products, loadtest+1..N users). Applied by k8s/up.ps1 after the migrate Job.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seed
+  namespace: scalecart
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          image: scalecart/api:dev
+          imagePullPolicy: Never
+          command: ["node", "dist/seed.js"]
+          envFrom: [{ configMapRef: { name: scalecart-config } }]
+          env:
+            - { name: DB_POOL_SIZE, value: "2" }
+            - { name: SEED_PRODUCTS, value: "2000" }
+            - { name: SEED_USERS, value: "1000" }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: DB_PASSWORD } }
+            - name: ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: ADMIN_PASSWORD } }
+            - name: SEED_USER_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: SEED_USER_PASSWORD } }

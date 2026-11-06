@@ -1,4 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
+import { attachDrain, stopDrainingForTests } from '../src/common/graceful-drain.js';
 import type { HttpAdapterName } from '../src/config/env.js';
 import { http, startApp } from './support.js';
 
@@ -11,6 +12,25 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('api on %s', (adapter) =>
 
   afterAll(async () => {
     await app.close();
+  });
+
+  it('while draining for shutdown: still serves, but says Connection: close and "not ready"', async () => {
+    // fetch keeps connections alive like real clients (supertest closes each one anyway).
+    const url = `${(await app.getUrl()).replace('[::1]', '127.0.0.1')}/lab/ping`;
+    const before = await fetch(url);
+    expect(before.status).toBe(200);
+    expect(before.headers.get('connection')).toBe('keep-alive');
+
+    attachDrain(app.getHttpServer()).start();
+    try {
+      const during = await fetch(url);
+      expect(during.status).toBe(200); // still answered
+      expect(during.headers.get('connection')).toBe('close'); // ...but the client should reconnect elsewhere
+      await http(app).get('/health/ready').expect(503);
+      await http(app).get('/health/live').expect(200); // alive: Kubernetes must not kill it early
+    } finally {
+      stopDrainingForTests();
+    }
   });
 
   it('GET /health/live is up', async () => {

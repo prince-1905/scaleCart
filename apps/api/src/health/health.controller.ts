@@ -1,8 +1,9 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { HealthCheck, HealthCheckService, TypeOrmHealthIndicator } from '@nestjs/terminus';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import { Public } from '../common/auth.js';
+import { isDraining } from '../common/graceful-drain.js';
 import { API_DATABASES } from '../database/modules.js';
 
 /**
@@ -31,6 +32,8 @@ export class HealthController {
   @Get('ready')
   @HealthCheck()
   ready() {
+    // Shutting down: say "not ready" so load balancers that poll this (not just Kubernetes) stop sending traffic.
+    if (isDraining()) throw new ServiceUnavailableException({ status: 'draining' });
     return this.health.check(
       API_DATABASES.map((module) => () => {
         const connection = this.moduleRef.get(getDataSourceToken(module), { strict: false });

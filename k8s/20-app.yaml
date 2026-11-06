@@ -1,0 +1,148 @@
+# The ScaleCart app: one image (scalecart/api:dev, loaded into kind by k8s/up.ps1), three uses:
+# the migrate Job, the API Deployment and the worker Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scalecart-config
+  namespace: scalecart
+data:
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_USER: scalecart
+  # Connection budget (E7c): MySQL allows 151. Each API pod has 7 module pools, so it holds up to
+  # 7 x DB_POOL_SIZE connections. At 5 that was 35 per pod: 4 pods peaked at 136, 5 pods hit the limit
+  # (830 refused, 761 of 1,000 checkouts failed). At 2: 14 per pod, 5 pods + worker ~ 82. Rule of thumb:
+  # max pods x 7 x DB_POOL_SIZE + worker < max_connections - spare. ProxySQL (connection sharing) is the next step.
+  DB_POOL_SIZE: "2"
+  REDIS_URL: redis://redis:6379
+  SMTP_HOST: mailpit
+  SMTP_PORT: "1025"
+  LOG_LEVEL: info
+  HTTP_ACCESS_LOG: "false"
+  HTTP_ADAPTER: fastify
+  HTTP_LISTEN_BACKLOG: "4096"
+  LAB_ENDPOINTS: "true"
+  PAYMENT_TIMEOUT_SECONDS: "900"
+  # Graceful drain on SIGTERM: keep serving with "Connection: close" this long, then close (E7a).
+  SHUTDOWN_DRAIN_SECONDS: "5"
+  # Close a keep-alive connection after 500 requests: the Service balances per connection, so this is
+  # what lets clients spread onto pods the autoscaler just added (E7b).
+  HTTP_MAX_REQUESTS_PER_SOCKET: "500"
+---
+# Creates the module databases and applies migrations, once, before the API serves (never inside every replica).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: scalecart
+spec:
+  backoffLimit: 10   # MySQL may still be starting: retry
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: scalecart/api:dev
+          imagePullPolicy: Never
+          command: ["node", "dist/migrate.js"]
+          envFrom: [{ configMapRef: { name: scalecart-config } }]
+          env:
+            - { name: DB_POOL_SIZE, value: "1" }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: DB_PASSWORD } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: scalecart
+spec:
+  type: NodePort   # kind publishes 30080 as http://localhost:8089 (k8s/kind-config.yaml)
+  selector: { app: api }
+  ports: [{ port: 3000, targetPort: 3000, nodePort: 30080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: scalecart
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: api } }
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }   # a new pod is ready before an old one stops
+  template:
+    metadata: { labels: { app: api } }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: scalecart/api:dev
+          imagePullPolicy: Never
+          envFrom: [{ configMapRef: { name: scalecart-config } }]
+          env:
+            - { name: PORT, value: "3000" }
+            - { name: NODE_OPTIONS, value: "--max-old-space-size=384" }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: DB_PASSWORD } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: JWT_SECRET } }
+          ports: [{ containerPort: 3000 }]
+          # Startup: give Nest time to boot before the other probes count.
+          startupProbe:
+            httpGet: { path: /health/live, port: 3000 }
+            periodSeconds: 2
+            failureThreshold: 30
+          # Liveness checks nothing external: a database blip must not restart every pod at once.
+          livenessProbe:
+            httpGet: { path: /health/live, port: 3000 }
+            periodSeconds: 10
+            failureThreshold: 3
+          # Readiness pings the module databases: a pod that can't reach them gets no traffic.
+          readinessProbe:
+            httpGet: { path: /health/ready, port: 3000 }
+            periodSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            # Kubernetes removes a stopping pod from the Service and sends SIGTERM at the same time.
+            # Waiting a few seconds first lets traffic stop arriving before Node starts shutting down.
+            preStop:
+              sleep: { seconds: 5 }
+          resources:
+            requests: { cpu: 500m, memory: 256Mi }   # the HPA's "100%" is the request
+            limits: { cpu: "1", memory: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: scalecart
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: worker } }
+  template:
+    metadata: { labels: { app: worker } }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: worker
+          image: scalecart/api:dev
+          imagePullPolicy: Never
+          command: ["node", "dist/worker.js"]
+          envFrom: [{ configMapRef: { name: scalecart-config } }]
+          env:
+            - { name: PORT, value: "3001" }
+            - { name: NODE_OPTIONS, value: "--max-old-space-size=192" }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: DB_PASSWORD } }
+            - name: RABBITMQ_PASSWORD
+              valueFrom: { secretKeyRef: { name: scalecart-secrets, key: RABBITMQ_PASSWORD } }
+            # $(VAR) is expanded by Kubernetes from the variable defined just above.
+            - { name: RABBITMQ_URL, value: "amqp://scalecart:$(RABBITMQ_PASSWORD)@rabbitmq:5672" }
+          ports: [{ containerPort: 3001 }]
+          livenessProbe:
+            httpGet: { path: /health/live, port: 3001 }
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 200m, memory: 128Mi }
+            limits: { cpu: "1", memory: 256Mi }

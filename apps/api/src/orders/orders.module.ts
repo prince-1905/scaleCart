@@ -9,6 +9,7 @@ import { DropsCoreModule } from '../drops/drops-core.module.js';
 import { CheckoutService } from './checkout.service.js';
 import { OrdersCoreModule } from './orders-core.module.js';
 import { OrdersController } from './orders.controller.js';
+import { OrdersAdmin, OrdersAdminController } from './orders-admin.js';
 
 @Module({
   imports: [
@@ -22,7 +23,7 @@ import { OrdersController } from './orders.controller.js';
     UsersModule,
     MailerModule,
   ],
-  controllers: [OrdersController],
-  providers: [CheckoutService],
+  controllers: [OrdersController, OrdersAdminController],
+  providers: [CheckoutService, OrdersAdmin],
 })
 export class OrdersModule {}

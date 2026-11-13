@@ -71,11 +71,18 @@ export class PaymentsController {
   @Public()
   @Post('payments/razorpay/callback')
   @Redirect()
-  async callback(@Query('order') order: string | undefined, @Body() body: Record<string, unknown>) {
+  async callback(
+    @Query('order') order: string | undefined,
+    @Query('return') returnTo: string | undefined,
+    @Body() body: Record<string, unknown>,
+  ) {
     const orderId = order && UUID_PATTERN.test(order) ? order : '';
-    // Always a fixed same-site path: never redirect to anything taken from the request.
+    // Always a fixed same-site path, picked from a list: never redirect to anything taken from the request.
     const back = (params: Record<string, string>) => ({
-      url: `/demo/?${new URLSearchParams({ order: orderId, ...params })}`,
+      url:
+        returnTo === 'shop' && orderId
+          ? `/shop/orders/${orderId}?${new URLSearchParams(params)}`
+          : `/demo/?${new URLSearchParams({ order: orderId, ...params })}`,
       statusCode: 303,
     });
 

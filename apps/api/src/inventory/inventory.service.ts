@@ -33,6 +33,16 @@ export class InventoryService {
     return row?.available ?? null;
   }
 
+  /** Stock of several products in one query (admin product table). Missing ids are left out. */
+  async getAvailableMany(productIds: number[]): Promise<Map<number, number>> {
+    if (productIds.length === 0) return new Map();
+    const rows: { productId: number; available: number }[] = await this.db.query(
+      'SELECT product_id AS productId, available FROM stock WHERE product_id IN (?)',
+      [productIds],
+    );
+    return new Map(rows.map((r) => [r.productId, r.available]));
+  }
+
   async setAvailable(productId: number, available: number): Promise<void> {
     await this.db.query(
       `INSERT INTO stock (product_id, available) VALUES (?, ?) AS new

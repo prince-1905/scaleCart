@@ -4,6 +4,7 @@ import { moduleTypeOrm } from '../database/module-typeorm.js';
 import { InventoryCoreModule } from '../inventory/inventory-core.module.js';
 import { ObservabilityModule } from '../observability/observability.module.js';
 import { OrdersCoreModule } from '../orders/orders-core.module.js';
+import { DropsDataModule } from '../drops/drop-purchases.js';
 import { PAYMENT_GATEWAY, type PaymentGateway } from './payment-gateway.js';
 import { paymentsDatabase } from './payments.database.js';
 import { PaymentsService } from './payments.service.js';
@@ -12,7 +13,7 @@ import { WebhookService } from './webhook.service.js';
 
 /** Payments without HTTP: used by the API (via PaymentsModule) and by the worker's jobs. */
 @Module({
-  imports: [...moduleTypeOrm(paymentsDatabase), OrdersCoreModule, InventoryCoreModule, ObservabilityModule],
+  imports: [...moduleTypeOrm(paymentsDatabase), OrdersCoreModule, InventoryCoreModule, DropsDataModule, ObservabilityModule],
   providers: [
     {
       provide: PAYMENT_GATEWAY,

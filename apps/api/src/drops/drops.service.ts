@@ -40,6 +40,15 @@ export interface NewDrop {
   maxShoppers?: number | null;
 }
 
+/** What an admin may change on a drop. */
+export interface DropChanges {
+  name?: string;
+  startsAt?: Date;
+  maxPerCustomer?: number;
+  admitPerSecond?: number;
+  maxShoppers?: number | null;
+}
+
 /** One drop a checkout took part in, and the waiting-room ticket the buyer used. */
 export interface DropClaim {
   dropId: number;
@@ -50,6 +59,8 @@ export interface DropClaim {
 
 /** Checkout reads drops on every order: keep them in memory for a few seconds. */
 const DROP_CACHE_MS = 5_000;
+/** How long "join the line" trusts a MySQL stock reading when there is no Redis counter. */
+const STOCK_CACHE_MS = 2_000;
 
 /**
  * Drops: scheduled flash sales. The rules are enforced here, on the server, at checkout:
@@ -58,6 +69,7 @@ const DROP_CACHE_MS = 5_000;
 @Injectable()
 export class DropsService {
   private cache?: { at: number; byProduct: Map<number, Drop> };
+  private readonly stockCache = new Map<number, { at: number; available: number }>();
 
   constructor(
     @InjectDataSource('drops') private readonly db: DataSource,
@@ -106,9 +118,58 @@ export class DropsService {
     return drop ? this.view(drop) : null;
   }
 
-  /** Joins the waiting room (or reports the place already held). */
-  async queue(dropId: number, userId: string): Promise<QueueStatus> {
-    const drop = await this.db.getRepository(Drop).findOneBy({ id: dropId });
+  /** Admin: change a drop's timing or limits. The in-memory lists of every replica catch up within 5 s. */
+  async update(id: number, changes: DropChanges): Promise<DropView> {
+    const drop = await this.db.getRepository(Drop).findOneBy({ id });
+    if (!drop) throw new NotFoundException('drop not found');
+    const set = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
+    if (Object.keys(set).length > 0) await this.db.getRepository(Drop).update({ id }, set);
+    this.cache = undefined;
+    return (await this.get(id))!;
+  }
+
+  /** Admin: cancel a drop, only while nobody has bought in it (orders already placed would lose their drop). */
+  async remove(id: number): Promise<void> {
+    const [{ purchases }] = await this.db.query('SELECT COUNT(*) AS purchases FROM drop_purchases WHERE drop_id = ?', [id]);
+    if (Number(purchases) > 0) {
+      throw new ConflictException({ statusCode: 409, error: 'drop_has_orders', message: 'customers already have orders in this drop' });
+    }
+    const result = await this.db.getRepository(Drop).delete({ id });
+    if (!result.affected) throw new NotFoundException('drop not found');
+    this.cache = undefined;
+  }
+
+  /** Admin's live monitor: the line (Redis), purchases (MySQL), stock and the door counter. */
+  async stats(id: number) {
+    const drop = await this.db.getRepository(Drop).findOneBy({ id });
+    if (!drop) throw new NotFoundException('drop not found');
+    const [line, [{ purchases }], available, gateCounter] = await Promise.all([
+      this.room.lineStats(drop),
+      this.db.query('SELECT COUNT(*) AS purchases FROM drop_purchases WHERE drop_id = ?', [id]),
+      this.inventory.getAvailable(drop.productId),
+      this.gate.peek(id),
+    ]);
+    return {
+      dropId: id,
+      ...line,
+      inLine: line.ticketsIssued === null || line.calledUpTo === null ? null : Math.max(0, line.ticketsIssued - line.calledUpTo),
+      purchases: Number(purchases),
+      available,
+      gateCounter: gateCounter ?? null,
+      serverTime: new Date().toISOString(),
+    };
+  }
+
+  /** Joins the waiting room (or reports the place already held). Staff can't: limited stock is for customers. */
+  async queue(dropId: number, userId: string, role: 'customer' | 'admin' = 'customer'): Promise<QueueStatus> {
+    if (role === 'admin') {
+      throw new ForbiddenException({ statusCode: 403, error: 'staff_cannot_join_drops', message: 'staff accounts cannot join drops' });
+    }
+    // From the 5 s in-memory list: every buyer repeats this call every few seconds (E7c: reading
+    // MySQL here on every call timed out under load).
+    const drop =
+      [...(await this.dropsByProduct()).values()].find((d) => d.id === dropId) ??
+      (await this.db.getRepository(Drop).findOneBy({ id: dropId }));
     if (!drop) throw new NotFoundException('drop not found');
     const opensAt = drop.startsAt.getTime() - PREQUEUE_MS;
     if (Date.now() < opensAt) {
@@ -119,7 +180,26 @@ export class DropsService {
         opensAt: new Date(opensAt).toISOString(),
       });
     }
+    // Sold out: no ticket, no "your turn" that can only end in "sold out". The line resumes by itself
+    // if stock comes back (an unpaid order expires and the counter is reset from MySQL).
+    if (await this.soldOut(drop)) {
+      return { dropId, ticket: 0, admittedUpTo: 0, position: 0, etaSeconds: 0, admitted: false, soldOut: true };
+    }
     return this.room.join(drop, userId);
+  }
+
+  /**
+   * Is there nothing left to try for? The Redis door counter answers without MySQL. Without one (gate off,
+   * Redis down, or no checkout yet), MySQL's stock, remembered for 2 s per drop.
+   */
+  private async soldOut(drop: Drop): Promise<boolean> {
+    const counter = this.env.dropStockGate ? await this.gate.peek(drop.id) : undefined;
+    if (counter !== undefined) return counter <= 0;
+    const cached = this.stockCache.get(drop.id);
+    if (cached && Date.now() - cached.at < STOCK_CACHE_MS) return cached.available <= 0;
+    const available = (await this.inventory.getAvailable(drop.productId)) ?? 0;
+    this.stockCache.set(drop.id, { at: Date.now(), available });
+    return available <= 0;
   }
 
   /**

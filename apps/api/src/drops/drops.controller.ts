@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, NotFoundException, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import { IsInt, IsISO8601, IsOptional, IsString, Length, Max, Min } from 'class-validator';
 import { CurrentUser, Public, Roles, type AuthUser } from '../common/auth.js';
 import { DropsService } from './drops.service.js';
@@ -36,6 +36,36 @@ export class CreateDropDto {
   @Min(1)
   @Max(10_000)
   maxShoppers?: number;
+}
+
+/** Admin edit: send only what changes. maxShoppers: null switches back to the time-based line. */
+export class UpdateDropDto {
+  @IsOptional()
+  @IsString()
+  @Length(1, 200)
+  name?: string;
+
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  startsAt?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10)
+  maxPerCustomer?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  admitPerSecond?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(10_000)
+  maxShoppers?: number | null;
 }
 
 @Controller('drops')
@@ -77,6 +107,32 @@ export class DropsController {
   @Post(':id/queue')
   @HttpCode(200)
   queue(@CurrentUser() user: AuthUser, @Param('id', ParseIntPipe) id: number) {
-    return this.drops.queue(id, user.id);
+    return this.drops.queue(id, user.id, user.role);
+  }
+
+  @Roles('admin')
+  @Patch(':id')
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateDropDto) {
+    return this.drops.update(id, {
+      name: dto.name,
+      startsAt: dto.startsAt === undefined ? undefined : new Date(dto.startsAt),
+      maxPerCustomer: dto.maxPerCustomer,
+      admitPerSecond: dto.admitPerSecond,
+      maxShoppers: dto.maxShoppers,
+    });
+  }
+
+  @Roles('admin')
+  @Delete(':id')
+  @HttpCode(204)
+  remove(@Param('id', ParseIntPipe) id: number) {
+    return this.drops.remove(id);
+  }
+
+  /** Live monitor for staff: people in line, called, shopping, sold, stock left. */
+  @Roles('admin')
+  @Get(':id/stats')
+  stats(@Param('id', ParseIntPipe) id: number) {
+    return this.drops.stats(id);
   }
 }

@@ -141,3 +141,18 @@ ends, which is part of why the window mode moved slower.
    ~27 s. Fix: a valid pass proves the drop started, so checkout doesn't re-check the clock; durations use a
    monotonic clock.
 </details>
+
+---
+
+## 6. Two gaps found while explaining the flow, fixed (2026-11-12, Phase 5 branch)
+
+| Gap | Before | After |
+|---|---|---|
+| **The line kept calling numbers after a sell-out** | #80 waits, gets "your turn", then "sold out" at checkout | `POST /drops/:id/queue` answers `{ soldOut: true }` with no ticket and no pass. It checks the Redis door counter (no MySQL), or MySQL's stock cached 2 s if there's no counter. The line **reopens by itself** if stock comes back. The drop itself is read from the 5 s in-memory list, not MySQL (the E7c connect timeouts) |
+| **One abandoned payment locked a customer out of the drop** | the "one per customer" row stayed after the unpaid order was cancelled | the payment-timeout job deletes the row when it cancels the order (`DropPurchases.releaseOrder`), so the customer may try again |
+
+**Proof:** e2e "once sold out, the line closes … reopens if stock comes back" and "a drop order that expires unpaid frees the customer to try that drop again". Mutation checks: disabling each fix made its test fail.
+
+**Q: What does "your turn" guarantee?** Only the right to *try* for ~5 minutes. Stock is taken at **Buy now** (checkout),
+held 15 minutes while you pay, and returned if you don't. Among called buyers, the first to check out wins; MySQL
+guarantees never more than the stock.

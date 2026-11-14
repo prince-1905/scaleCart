@@ -19,6 +19,7 @@ import { UUID_PATTERN } from '../common/uuid.js';
 import { CheckoutDto, IDEMPOTENCY_KEY_PATTERN } from './checkout.dto.js';
 import { CheckoutService } from './checkout.service.js';
 import { OrdersService } from './orders.service.js';
+import { RateLimit } from '../rate-limit/rate-limit.js';
 
 class ListOrdersQuery {
   @IsOptional()
@@ -45,6 +46,7 @@ export class OrdersController {
    * Requires an `Idempotency-Key` header (e.g. a UUID the client creates once per
    * checkout attempt and reuses on every retry of it).
    */
+  @RateLimit('checkout')
   @Post('checkout')
   @HttpCode(201)
   async checkout(

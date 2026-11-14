@@ -23,6 +23,9 @@ export type StockReservationStrategy = 'atomic' | 'locking' | 'naive';
  */
 export type NotifyMode = 'outbox' | 'sync';
 
+import type { RateLimitPolicy } from '../rate-limit/rate-limit.js';
+import type { BucketSize } from '../rate-limit/token-bucket.js';
+
 export type AiThinkingLevel = 'minimal' | 'low' | 'medium' | 'high';
 
 /** api = the HTTP server; worker = background process (outbox relay, consumers, cleanup jobs). */
@@ -104,6 +107,12 @@ export interface Env {
   shutdownDrainSeconds: number;
   /** Close a keep-alive connection after this many requests, so load spreads to new pods (E7b). 0 = no limit. */
   httpMaxRequestsPerSocket: number;
+  /** API-wide token-bucket rate limit (Redis). Off for load tests that send everything from one IP. */
+  rateLimitEnabled: boolean;
+  /** Bucket size per policy, from RATE_LIMIT_<POLICY>="capacity:refillPerSecond". */
+  rateLimits: Record<RateLimitPolicy, BucketSize>;
+  /** Behind NGINX: take the client IP from X-Real-IP. Never enable without a proxy that sets it. */
+  trustProxy: boolean;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -127,6 +136,16 @@ function nonNegativeInt(source: NodeJS.ProcessEnv, name: string, fallback: numbe
     throw new Error(`Invalid ${name}: ${raw}`);
   }
   return value;
+}
+
+/** "capacity:refillPerSecond", e.g. "10:0.2" = bursts of 10, then one every 5 s. */
+function bucketSize(source: NodeJS.ProcessEnv, name: string, fallback: string): BucketSize {
+  const raw = source[name] || fallback;
+  const [capacity, refillPerSecond] = raw.split(':').map(Number);
+  if (!Number.isInteger(capacity) || capacity <= 0 || !(refillPerSecond > 0)) {
+    throw new Error(`Invalid ${name}: ${raw} (expected capacity:refillPerSecond, e.g. 10:0.2)`);
+  }
+  return { capacity, refillPerSecond };
 }
 
 /** Database settings only, so one-off jobs (migrate, seed) don't need the API's secrets. */
@@ -225,6 +244,13 @@ export function loadEnv(
     dropStockGateResetSeconds: positiveInt(source, 'DROP_STOCK_GATE_RESET_SECONDS', 10),
     shutdownDrainSeconds: nonNegativeInt(source, 'SHUTDOWN_DRAIN_SECONDS', 5),
     httpMaxRequestsPerSocket: nonNegativeInt(source, 'HTTP_MAX_REQUESTS_PER_SOCKET', 0),
+    rateLimitEnabled: bool(source.RATE_LIMIT_ENABLED, true),
+    rateLimits: {
+      default: bucketSize(source, 'RATE_LIMIT_DEFAULT', '60:20'),
+      auth: bucketSize(source, 'RATE_LIMIT_AUTH', '10:0.2'),
+      checkout: bucketSize(source, 'RATE_LIMIT_CHECKOUT', '5:0.5'),
+    },
+    trustProxy: bool(source.TRUST_PROXY, false),
   };
 }
 

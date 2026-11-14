@@ -52,6 +52,9 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   LOG_LEVEL: 'silent',
   // Tests reset the drop counters themselves (resetGates), never on a timer in the middle of a test.
   DROP_STOCK_GATE_RESET_SECONDS: '3600',
+  // Every test request comes from 127.0.0.1: one shared bucket would throttle the whole suite.
+  // rate-limit.e2e-spec.ts turns it on with small buckets.
+  RATE_LIMIT_ENABLED: 'false',
 };
 
 export async function startApp(

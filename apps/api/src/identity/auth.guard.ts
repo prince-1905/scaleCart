@@ -27,9 +27,21 @@ export class AuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') return true;
     const targets = [context.getHandler(), context.getClass()];
-    if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, targets)) return true;
-
     const req = context.switchToHttp().getRequest();
+    if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, targets)) {
+      // Public routes still note who's calling when a valid token comes along: the rate limit
+      // counts logged-in shoppers by user id, not by their (often shared) IP (E9). A missing or
+      // bad token is no error here: the route is public.
+      if (typeof req.headers.authorization === 'string') {
+        const [scheme, token] = req.headers.authorization.split(' ');
+        if (scheme === 'Bearer' && token) {
+          const claims = await this.jwt.verifyAsync<AccessTokenClaims>(token).catch(() => undefined);
+          if (claims) req.user = { id: claims.sub, role: claims.role } satisfies AuthUser;
+        }
+      }
+      return true;
+    }
+
     const header: string | undefined = req.headers.authorization;
     const [scheme, token] = header?.split(' ') ?? [];
     if (scheme !== 'Bearer' || !token) throw new UnauthorizedException('missing bearer token');

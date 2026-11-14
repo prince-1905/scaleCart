@@ -181,6 +181,14 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  /** API-wide rate limit: allowed or limited (429); source = redis (shared) or local (Redis too slow/down: this pod's own bucket). */
+  readonly rateLimit = new Counter({
+    name: 'rate_limit_total',
+    help: 'Requests checked by the API-wide token bucket, by policy, result and which bucket decided.',
+    labelNames: ['policy', 'result', 'source'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

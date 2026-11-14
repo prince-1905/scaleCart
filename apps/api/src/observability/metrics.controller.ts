@@ -1,10 +1,12 @@
 import { Controller, Get, Header } from '@nestjs/common';
 import { Registry } from 'prom-client';
 import { Public } from '../common/auth.js';
+import { SkipRateLimit } from '../rate-limit/rate-limit.js';
 import { MetricsService } from './metrics.service.js';
 
 // Public for the local lab. In production, serve it on an internal-only port instead.
 @Public()
+@SkipRateLimit()
 @Controller('metrics')
 export class MetricsController {
   constructor(private readonly metrics: MetricsService) {}

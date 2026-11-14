@@ -28,6 +28,9 @@ data:
   # Close a keep-alive connection after 500 requests: the Service balances per connection, so this is
   # what lets clients spread onto pods the autoscaler just added (E7b).
   HTTP_MAX_REQUESTS_PER_SOCKET: "500"
+  # No NGINX in front here (no X-Real-IP), and every k6 request comes from one host: off, like the
+  # Compose load tests. Turn on to try it; it then counts logged-out callers by the connecting address.
+  RATE_LIMIT_ENABLED: "false"
 ---
 # Creates the module databases and applies migrations, once, before the API serves (never inside every replica).
 apiVersion: batch/v1

@@ -1,4 +1,3 @@
-import { describe, expect, it } from 'vitest';
 import { DropPassSigner } from './drop-pass.js';
 import { admittedUpTo } from './waiting-room.js';
 

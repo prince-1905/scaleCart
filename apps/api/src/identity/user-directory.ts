@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { User } from './user.entity.js';
 
 /**
@@ -14,5 +14,12 @@ export class UserDirectory {
   async getEmail(userId: string): Promise<string | null> {
     const user = await this.users.findOne({ where: { id: userId }, select: { email: true } });
     return user?.email ?? null;
+  }
+
+  /** Emails for a page of users at once (admin order list): one query, not one per row. */
+  async getEmails(userIds: string[]): Promise<Map<string, string>> {
+    if (userIds.length === 0) return new Map();
+    const rows = await this.users.find({ where: { id: In([...new Set(userIds)]) }, select: { id: true, email: true } });
+    return new Map(rows.map((u) => [u.id, u.email]));
   }
 }

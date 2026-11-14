@@ -82,6 +82,8 @@ export interface QueueStatus {
   /** Present once admitted: send it with the checkout. */
   pass?: string;
   passExpiresAt?: string;
+  /** Nothing left to try for: the line is closed (no ticket is handed out). */
+  soldOut?: boolean;
 }
 
 /**
@@ -212,6 +214,17 @@ export class WaitingRoom {
     if (!pass) return null;
     const claims = this.signer.verify(pass, now);
     return claims !== null && claims.d === dropId && claims.u === userId ? claims.t : null;
+  }
+
+  /** For the admin's live monitor: tickets handed out and numbers called so far. Null fields if Redis can't say. */
+  async lineStats(drop: DropTiming, now = Date.now()): Promise<{ ticketsIssued: number | null; calledUpTo: number | null; shopping: number | null }> {
+    const read = await this.redis.tryRun('drop_line_stats', (r) =>
+      Promise.all([r.get(seqKey(drop.id)), r.get(calledKey(drop.id)), r.zCount(activeKey(drop.id), now, '+inf')]),
+    );
+    if (!read) return { ticketsIssued: null, calledUpTo: null, shopping: null };
+    const issued = Number(read[0] ?? 0);
+    if (drop.maxShoppers !== null) return { ticketsIssued: issued, calledUpTo: Number(read[1] ?? 0), shopping: read[2] };
+    return { ticketsIssued: issued, calledUpTo: Math.min(issued, admittedUpTo(drop, now)), shopping: null };
   }
 
   /** How many tickets have been handed out (for the drop page). Null if Redis can't say. */

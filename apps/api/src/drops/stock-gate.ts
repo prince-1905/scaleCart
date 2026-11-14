@@ -71,6 +71,12 @@ export class StockGate {
     );
   }
 
+  /** Units the counter still allows; undefined if there's no counter yet or Redis can't answer. */
+  async peek(dropId: number): Promise<number | undefined> {
+    const raw = await this.redis.tryRun('stock_gate_peek', (r) => r.get(counterKey(dropId)));
+    return raw === undefined || raw === null ? undefined : Number(raw);
+  }
+
   private async run(dropId: number, qty: number): Promise<number | undefined> {
     const reply = await this.redis.tryRun('stock_gate_take', (r) =>
       r.eval(TAKE_SCRIPT, { keys: [counterKey(dropId)], arguments: [String(qty)] }),

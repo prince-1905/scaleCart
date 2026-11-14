@@ -13,6 +13,7 @@ import { DataSource } from 'typeorm';
 import { uuidv7 } from '../common/uuid.js';
 import { ENV, type Env } from '../config/env.js';
 import { isDuplicateKey } from '../database/database.js';
+import { DropPurchases } from '../drops/drop-purchases.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { MetricsService } from '../observability/metrics.service.js';
 import { OrderLifecycle } from '../orders/order-lifecycle.js';
@@ -71,6 +72,7 @@ export class PaymentsService {
     @Inject(PAYMENT_GATEWAY) private readonly gateway: PaymentGateway | null,
     private readonly orders: OrderLifecycle,
     private readonly inventory: InventoryService,
+    private readonly dropPurchases: DropPurchases,
     private readonly metrics: MetricsService,
     @Inject(ENV) private readonly env: Env,
   ) {}
@@ -283,6 +285,8 @@ export class PaymentsService {
       }
       if (await this.orders.cancelIfUnpaid(orderId)) {
         await this.inventory.release(orderId);
+        // Not bought after all: a drop customer may try that drop again.
+        await this.dropPurchases.releaseOrder(orderId);
         result.cancelled++;
       }
     }

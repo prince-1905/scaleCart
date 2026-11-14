@@ -133,9 +133,12 @@ export class CheckoutService {
 
     this.count('created');
     // After the order is safe. If this fails, a leftover cart line is harmless.
-    await this.cart
-      .removeProducts(userId, order.items.map((i) => i.productId))
-      .catch((err) => this.logger.warn({ err, userId }, 'could not clear purchased cart lines'));
+    // "Buy now" never came from the cart, so the cart stays exactly as it was.
+    if (!dto.buyNow) {
+      await this.cart
+        .removeProducts(userId, order.items.map((i) => i.productId))
+        .catch((err) => this.logger.warn({ err, userId }, 'could not clear purchased cart lines'));
+    }
     return { replayed: false, order };
   }
 
@@ -145,7 +148,10 @@ export class CheckoutService {
     orderId: string,
     dto: CheckoutDto,
   ): Promise<OrderView> {
-    const lines = await this.cart.getLines(userId);
+    // "Buy now" buys one item on its own: other things in the cart are neither bought nor touched.
+    const lines = dto.buyNow
+      ? [{ productId: dto.buyNow.productId, quantity: dto.buyNow.quantity }]
+      : await this.cart.getLines(userId);
     if (lines.length === 0) throw new BadRequestException('cart is empty');
 
     // Drops first, before any other database work. The rules (limit, pass) need no database,

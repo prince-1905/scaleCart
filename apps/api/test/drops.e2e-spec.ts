@@ -170,13 +170,46 @@ describe('drops and the waiting room', () => {
     expect(retry.body.id).toBe(first.body.id);
   });
 
+  it('"Buy now" buys only the drop item: the rest of the cart is neither bought nor touched, even when it fails', async () => {
+    const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 1 });
+    const other = await createProduct(app, admin, { stock: 5, priceCents: 300_00 });
+    const [user, rival] = [await registerUser(app), await registerUser(app)];
+    const cartOf = async (u: TestUser) =>
+      (await http(app).get('/cart').auth(u.accessToken, { type: 'bearer' }).expect(200)).body.items.map(
+        (i: { productId: number; quantity: number }) => `${i.productId}x${i.quantity}`,
+      );
+    const buyNow = (u: TestUser, pass: string) =>
+      http(app)
+        .post('/checkout')
+        .auth(u.accessToken, { type: 'bearer' })
+        .set('Idempotency-Key', randomUUID())
+        .send({ dropPass: pass, buyNow: { productId, quantity: 1 } });
+    for (const u of [user, rival]) {
+      await http(app).put(`/cart/items/${other}`).auth(u.accessToken, { type: 'bearer' }).send({ quantity: 2 }).expect(200);
+    }
+    const [userPass, rivalPass] = [(await queue(user, dropId)).body.pass, (await queue(rival, dropId)).body.pass];
+
+    const res = await buyNow(user, userPass).expect(201);
+    expect(res.body.items).toEqual([expect.objectContaining({ productId, quantity: 1 })]);
+    expect(res.body.totalCents).toBe(999_00);
+    expect(await cartOf(user)).toEqual([`${other}x2`]);
+    expect((await http(app).get(`/inventory/${other}`)).body.available).toBe(5);
+
+    // Sold out now: the rival's attempt fails and leaves no drop item behind in their cart.
+    expect((await buyNow(rival, rivalPass)).status).toBe(409);
+    expect(await cartOf(rival)).toEqual([`${other}x2`]);
+  });
+
   it('sold out: the losing buyer keeps their right to buy (claim released)', async () => {
     const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 1 });
     const winner = await registerUser(app);
     const loser = await registerUser(app);
-    expect((await buy(winner, productId, (await queue(winner, dropId)).body.pass)).status).toBe(201);
+    // Both are called while there's still stock; the winner checks out first.
+    const winnerPass = (await queue(winner, dropId)).body.pass;
+    const loserPass = (await queue(loser, dropId)).body.pass;
+    expect((await buy(winner, productId, winnerPass)).status).toBe(201);
 
-    const res = await buy(loser, productId, (await queue(loser, dropId)).body.pass);
+    const res = await buy(loser, productId, loserPass);
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('out_of_stock');
     const rows = await dataSource(app, 'drops').query('SELECT 1 FROM drop_purchases WHERE drop_id = ? AND user_id = ?', [
@@ -184,6 +217,23 @@ describe('drops and the waiting room', () => {
       (await http(app).get('/auth/me').auth(loser.accessToken, { type: 'bearer' })).body.id ?? '',
     ]);
     expect(rows).toHaveLength(0);
+  });
+
+  it('once sold out, the line closes: no ticket, no "your turn"; it reopens if stock comes back', async () => {
+    const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 1 });
+    const [first, late] = await Promise.all([registerUser(app), registerUser(app)]);
+    expect((await buy(first, productId, (await queue(first, dropId)).body.pass)).status).toBe(201);
+
+    const closed = (await queue(late, dropId)).body;
+    expect(closed).toMatchObject({ soldOut: true, admitted: false, ticket: 0 });
+    expect(closed.pass).toBeUndefined();
+
+    // An unpaid order expires and its unit goes back: after the counter's reset, the line is open again.
+    await http(app).put(`/inventory/${productId}`).auth(admin.accessToken, { type: 'bearer' }).send({ available: 1 }).expect(200);
+    await app.get(DropsService).resetGates();
+    const reopened = (await queue(late, dropId)).body;
+    expect(reopened.soldOut).toBeUndefined();
+    expect(reopened.admitted).toBe(true);
   });
 
   describe('"one out, one in" (maxShoppers)', () => {
@@ -209,15 +259,14 @@ describe('drops and the waiting room', () => {
       expect((await buy(c, productId, after.pass)).status).toBe(201);
     });
 
-    it('sold out also frees the place', async () => {
-      const { dropId, productId } = await newDrop({ startsInMs: -1_000, maxShoppers: 1, stock: 1 });
-      const [a, b, c] = await Promise.all([registerUser(app), registerUser(app), registerUser(app)]);
-      expect((await buy(a, productId, (await queue(a, dropId)).body.pass)).status).toBe(201);
-
+    it('two called buyers, one unit: the second checkout gets "sold out"', async () => {
+      const { dropId, productId } = await newDrop({ startsInMs: -1_000, maxShoppers: 2, stock: 1 });
+      const [a, b] = await Promise.all([registerUser(app), registerUser(app)]);
+      const sa = (await queue(a, dropId)).body;
       const sb = (await queue(b, dropId)).body;
       expect(sb.admitted).toBe(true);
+      expect((await buy(a, productId, sa.pass)).status).toBe(201);
       expect((await buy(b, productId, sb.pass)).body.error).toBe('out_of_stock');
-      expect((await queue(c, dropId)).body.admitted).toBe(true);
     });
 
     it('before the start, nobody is called', async () => {
@@ -234,8 +283,11 @@ describe('drops and the waiting room', () => {
       const buyers = await Promise.all([registerUser(app), registerUser(app), registerUser(app)]);
       const soldOutBefore = await gateCount('sold_out');
 
-      for (const b of buyers.slice(0, 2)) expect((await buy(b, productId, (await queue(b, dropId)).body.pass)).status).toBe(201);
-      const pass = (await queue(buyers[2], dropId)).body.pass;
+      // All three are called while stock remains (once sold out, the line hands out no passes).
+      const passes = [];
+      for (const b of buyers) passes.push((await queue(b, dropId)).body.pass);
+      for (const i of [0, 1]) expect((await buy(buyers[i], productId, passes[i])).status).toBe(201);
+      const pass = passes[2];
 
       // Jam the MySQL stock row (like a stuck commit). Without the gate, the third checkout would
       // wait for this lock; with it, "sold out" comes back without touching the row.
@@ -258,6 +310,7 @@ describe('drops and the waiting room', () => {
     it('a wrong counter still cannot oversell (MySQL decides), and the reset corrects it', async () => {
       const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 5 });
       const [a, b, c] = await Promise.all([registerUser(app), registerUser(app), registerUser(app)]);
+      const cPass = (await queue(c, dropId)).body.pass; // called while stock remains
       expect((await buy(a, productId, (await queue(a, dropId)).body.pass)).status).toBe(201); // counter: 4
 
       // Stock changes behind the counter's back: MySQL now says 0, the counter still says 4.
@@ -269,7 +322,7 @@ describe('drops and the waiting room', () => {
 
       await app.get(DropsService).resetGates(); // counter := MySQL's 0
       const soldOutBefore = await gateCount('sold_out');
-      expect((await buy(c, productId, (await queue(c, dropId)).body.pass)).body.error).toBe('out_of_stock');
+      expect((await buy(c, productId, cPass)).body.error).toBe('out_of_stock');
       expect(await gateCount('sold_out')).toBe(soldOutBefore + 1); // answered by the gate this time
       expect((await http(app).get(`/inventory/${productId}`)).body.available).toBe(0);
     });
@@ -279,6 +332,58 @@ describe('drops and the waiting room', () => {
     const user = await registerUser(app);
     const productId = await createProduct(app, admin, { stock: 5 });
     expect((await buy(user, productId)).status).toBe(201);
+  });
+
+  describe('admin tools', () => {
+    it("staff can't join a drop's line, but can still buy normal products", async () => {
+      const { dropId } = await newDrop({ startsInMs: -1_000 });
+      expect((await queue(admin, dropId, 403)).body.error).toBe('staff_cannot_join_drops');
+      const productId = await createProduct(app, admin, { stock: 5 });
+      expect((await buy(admin, productId)).status).toBe(201);
+    });
+
+    it('admins edit a drop (customers get 403); maxShoppers null switches back to the timed line', async () => {
+      const customer = await registerUser(app);
+      const { dropId } = await newDrop({ startsInMs: 60_000, maxShoppers: 3 });
+      await http(app).patch(`/drops/${dropId}`).auth(customer.accessToken, { type: 'bearer' }).send({ maxPerCustomer: 2 }).expect(403);
+
+      const startsAt = iso(120_000);
+      const res = await http(app)
+        .patch(`/drops/${dropId}`)
+        .auth(admin.accessToken, { type: 'bearer' })
+        .send({ name: 'Renamed drop', startsAt, maxPerCustomer: 2, maxShoppers: null })
+        .expect(200);
+      expect(res.body).toMatchObject({ id: dropId, name: 'Renamed drop', startsAt, maxPerCustomer: 2, maxShoppers: null });
+      // Untouched fields stay; an empty edit changes nothing.
+      const same = await http(app).patch(`/drops/${dropId}`).auth(admin.accessToken, { type: 'bearer' }).send({}).expect(200);
+      expect(same.body).toMatchObject({ name: 'Renamed drop', admitPerSecond: 1000 });
+      await http(app).patch('/drops/999999').auth(admin.accessToken, { type: 'bearer' }).send({ maxPerCustomer: 2 }).expect(404);
+    });
+
+    it('a drop can be cancelled only while nobody has bought in it', async () => {
+      const empty = await newDrop({ startsInMs: 60_000 });
+      await http(app).delete(`/drops/${empty.dropId}`).auth(admin.accessToken, { type: 'bearer' }).expect(204);
+      await http(app).get(`/drops/${empty.dropId}`).expect(404);
+
+      const sold = await newDrop({ startsInMs: -1_000 });
+      const user = await registerUser(app);
+      expect((await buy(user, sold.productId, (await queue(user, sold.dropId)).body.pass)).status).toBe(201);
+      const res = await http(app).delete(`/drops/${sold.dropId}`).auth(admin.accessToken, { type: 'bearer' }).expect(409);
+      expect(res.body.error).toBe('drop_has_orders');
+      await http(app).delete(`/drops/${sold.dropId}`).auth(user.accessToken, { type: 'bearer' }).expect(403);
+    });
+
+    it('the live monitor counts the line, purchases and stock left', async () => {
+      const { dropId, productId } = await newDrop({ startsInMs: -1_000, stock: 10 });
+      const [a, b] = [await registerUser(app), await registerUser(app)];
+      await queue(a, dropId);
+      expect((await buy(b, productId, (await queue(b, dropId)).body.pass)).status).toBe(201);
+
+      const customer = await registerUser(app);
+      await http(app).get(`/drops/${dropId}/stats`).auth(customer.accessToken, { type: 'bearer' }).expect(403);
+      const stats = (await http(app).get(`/drops/${dropId}/stats`).auth(admin.accessToken, { type: 'bearer' }).expect(200)).body;
+      expect(stats).toMatchObject({ dropId, ticketsIssued: 2, calledUpTo: 2, inLine: 0, purchases: 1, available: 9 });
+    });
   });
 });
 

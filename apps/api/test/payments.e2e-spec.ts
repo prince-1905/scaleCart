@@ -292,6 +292,23 @@ describe.each(['fastify', 'express'] as const)('payments with Razorpay webhooks 
       const res = await callback('https://evil.example', { 'error[description]': 'x' });
       expect(res.headers.location).toBe('/demo/?order=&payment=failed&reason=x');
     });
+
+    it('return=shop sends the browser to the shop\'s order page; anything else falls back to the demo page', async () => {
+      const id = randomUUID();
+      const shop = await http(app)
+        .post(`/payments/razorpay/callback?order=${id}&return=shop`)
+        .type('form')
+        .send({ 'error[description]': 'declined' })
+        .expect(303);
+      expect(shop.headers.location).toBe(`/shop/orders/${id}?payment=failed&reason=declined`);
+
+      const other = await http(app)
+        .post(`/payments/razorpay/callback?order=${id}&return=https://evil.example`)
+        .type('form')
+        .send({ 'error[description]': 'x' })
+        .expect(303);
+      expect(other.headers.location).toBe(`/demo/?order=${id}&payment=failed&reason=x`);
+    });
   });
 
   describe('the payment timeout job', () => {
@@ -332,6 +349,34 @@ describe.each(['fastify', 'express'] as const)('payments with Razorpay webhooks 
       fake.down = true;
       await app.get(PaymentsService).expireOverdueOrders();
       expect(await orderStatus(app, user, order.id)).toBe('pending_payment');
+    });
+
+    it('a drop order that expires unpaid frees the customer to try that drop again', async () => {
+      const productId2 = await createProduct(app, admin, { priceCents: 1299_00, stock: 5 });
+      const drop = (
+        await http(app)
+          .post('/drops')
+          .auth(admin.accessToken, { type: 'bearer' })
+          .send({ productId: productId2, startsAt: new Date(Date.now() - 1000).toISOString(), admitPerSecond: 1000 })
+          .expect(201)
+      ).body;
+      const user = await registerUser(app);
+      const pass = async () =>
+        (await http(app).post(`/drops/${drop.id}/queue`).auth(user.accessToken, { type: 'bearer' }).expect(200)).body.pass;
+      const checkout = async () => {
+        await http(app).put(`/cart/items/${productId2}`).auth(user.accessToken, { type: 'bearer' }).send({ quantity: 1 }).expect(200);
+        return http(app).post('/checkout').auth(user.accessToken, { type: 'bearer' }).set('Idempotency-Key', randomUUID()).send({ dropPass: await pass() });
+      };
+
+      const first = await checkout();
+      expect(first.status).toBe(201);
+      expect((await checkout()).body.error).toBe('drop_already_bought'); // while the order is pending
+
+      await ageOrder(app, first.body.id);
+      await app.get(PaymentsService).expireOverdueOrders();
+
+      expect(await orderStatus(app, user, first.body.id)).toBe('cancelled');
+      expect((await checkout()).status).toBe(201); // didn't buy, so may try again
     });
 
     it('money that arrives after the order was cancelled is refunded, once', async () => {

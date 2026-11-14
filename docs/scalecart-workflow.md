@@ -391,6 +391,7 @@ in 58 ms; the expiry job cleared 39,807 abandoned orders in ~8 min.
       time-based:        tickets ≤ seconds since start × admitPerSecond   (pure arithmetic, no job)
       "one out, one in": at most maxShoppers called at once; a place frees when one buys / sells out / 60 s pass
  3. Called → a signed pass (HMAC: drop, user, ticket, expiry)
+    Sold out (Redis counter ≤ 0) → no ticket, "soldOut"; the line reopens if stock comes back
  4. Checkout {dropPass}, in this order (cheapest first):
       a. quantity ≤ maxPerCustomer · valid pass (or: not started yet → 409)            no database
       b. Redis door counter: "take 1 if ≥ 1 left" (Lua) → at 0: "sold out", MySQL never touched
@@ -440,6 +441,33 @@ who can't enter the stockroom. They hand a slip to the clerk, who checks it befo
 Every round and every tool call (name, inputs, result, time) is written to the API log:
 `docker compose logs -f api`. Full details are in [AI_LEARNING.md](AI_LEARNING.md).
 
+### N. The storefront (Phase 5): React + Tailwind at /shop/
+
+```
+ Browser ── /shop/…  ─► NGINX: apps/web/dist (index.html for every page, hashed assets cached 1 year)
+        └── /products, /cart, /checkout, /drops, /ai… ─► API (same origin, no CORS)
+ Login:    tokens in localStorage · 401 → ONE shared refresh (the API rotates refresh tokens)
+ Checkout: Idempotency-Key kept across retries + expectedTotalCents → POST /orders/:id/payment → Razorpay (redirect)
+           → API /payments/razorpay/callback?return=shop → /shop/orders/:id?payment=paid
+ Drops:    countdown on server time · POST /drops/:id/queue repeated every 1–5 s · admitted → Buy now with the pass
+ Chat:     POST /ai/chat/stream, read line by line (NDJSON)
+```
+
+Run: `cd apps/web && npm run dev` → http://localhost:5173/shop/ (or `npm run build` → http://localhost:8088/shop/).
+**Measured (E8):** 122.5 KB gzip of JavaScript on the first visit; code splitting saved only ~0.8 KB (the libraries are the
+weight).
+
+**Admin area** (`/shop/admin`, admin role only; the API checks the role on every call):
+
+```
+ Overview  GET /admin/orders/stats (orders + money per status, last 24 h)    ~130 ms: counts all orders
+ Orders    GET /admin/orders?status=&before=  (all customers, with emails)    ~4 ms: keyset paging
+ Products  /products/search + GET /inventory?productIds=… (1 call for all stock) · POST/PATCH /products · PUT /inventory/:id
+ Drops     POST/PATCH/DELETE /drops (delete → 409 once anyone bought) · GET /drops/:id/stats every 2 s
+           line from Redis (tickets, called, shopping) + purchases and stock from MySQL + the Redis door counter
+ Staff     POST /drops/:id/queue → 403 staff_cannot_join_drops (normal products stay buyable)
+```
+
 ### M. Running on Kubernetes (Phase 7-light)
 
 `./k8s/up.ps1` creates a one-node cluster (kind), loads the image, makes a Secret from `.env`, starts MySQL, Redis, RabbitMQ
@@ -485,7 +513,9 @@ checkouts failed); at pool size 2, 5 pods use 72–75 connections.
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Shared DB connections (ProxySQL) | Each pod has its own pools (7 × 2 connections); the pod count is capped by a connection budget (E7c) | next small phase |
 | Waiting-room drop cache | `POST /drops/:id/queue` reads the drop from MySQL on every call; 2 calls got 500 (connect timeout) with 5 pods (E7c) | small fix |
-| Demo website | Drops with countdown + waiting room, cart, checkout + Razorpay payment, orders, AI chat, admin product copy and drops (http://localhost:8088/demo/) | product pages, later |
+| Product photos | The catalog has no images; the storefront shows a category emoji on a gradient | an image column + object storage |
+| Browser end-to-end tests | The storefront has component tests with a fake API, no automated browser tests | Playwright |
+| HttpOnly refresh cookie | The storefront keeps tokens in localStorage (demo trade-off) | small API change |
 | 2FA, microservices, tracing | – | later |
 
 ---

@@ -201,6 +201,57 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('shop on %s', (adapter) =
       expect(await stockOf(app, plenty)).toBe(10);
     });
   });
+
+  describe('admin area', () => {
+    it("staff see every customer's orders with emails and totals; customers get 403", async () => {
+      const user = await registerUser(app);
+      await http(app).get('/admin/orders').set(bearer(user)).expect(403);
+      await http(app).get('/admin/orders/stats').set(bearer(user)).expect(403);
+
+      const before = (await http(app).get('/admin/orders/stats').set(bearer(admin)).expect(200)).body.byStatus;
+      const productId = await createProduct(app, admin, { priceCents: 250_00, stock: 5 });
+      await addToCart(app, user, productId, 2);
+      const orderId = (await checkout(app, user).expect(201)).body.id as string;
+
+      // Other test files place orders in parallel: look for ours in the newest 100.
+      const list = await http(app).get('/admin/orders').query({ status: 'pending_payment', limit: 100 }).set(bearer(admin)).expect(200);
+      const mine = list.body.items.find((o: { id: string }) => o.id === orderId);
+      expect(mine).toMatchObject({ status: 'pending_payment', totalCents: 500_00, email: user.email });
+      expect(list.body.items.every((o: { status: string }) => o.status === 'pending_payment')).toBe(true);
+
+      const after = (await http(app).get('/admin/orders/stats').set(bearer(admin)).expect(200)).body.byStatus;
+      expect(after.pending_payment.orders).toBeGreaterThan(before.pending_payment.orders);
+      expect(after.pending_payment.totalCents24h - before.pending_payment.totalCents24h).toBeGreaterThanOrEqual(500_00);
+
+      const one = await http(app).get(`/admin/orders/${orderId}`).set(bearer(admin)).expect(200);
+      expect(one.body).toMatchObject({ id: orderId, email: user.email, items: [{ productId, quantity: 2 }] });
+      await http(app).get('/admin/orders/not-a-uuid').set(bearer(admin)).expect(404);
+      await http(app).get('/admin/orders').query({ status: 'shipped' }).set(bearer(admin)).expect(400);
+    });
+
+    it('pages through all orders newest first', async () => {
+      const user = await registerUser(app);
+      const productId = await createProduct(app, admin, { stock: 10 });
+      for (let i = 0; i < 3; i++) {
+        await addToCart(app, user, productId, 1);
+        await checkout(app, user).expect(201);
+      }
+      const page1 = await http(app).get('/admin/orders').query({ limit: 2 }).set(bearer(admin)).expect(200);
+      expect(page1.body.items).toHaveLength(2);
+      const page2 = await http(app).get('/admin/orders').query({ limit: 2, before: page1.body.nextBefore }).set(bearer(admin)).expect(200);
+      expect(page2.body.items[0].id < page1.body.items[1].id).toBe(true);
+    });
+
+    it('reads stock of many products in one call', async () => {
+      const a = await createProduct(app, admin, { stock: 3 });
+      const b = await createProduct(app, admin, { stock: 7 });
+      const res = await http(app).get('/inventory').query({ productIds: `${a},${b},999999999` }).expect(200);
+      expect(res.body.items).toEqual(expect.arrayContaining([{ productId: a, available: 3 }, { productId: b, available: 7 }]));
+      expect(res.body.items).toHaveLength(2);
+      const tooMany = Array.from({ length: 101 }, (_, i) => i + 1).join(',');
+      await http(app).get('/inventory').query({ productIds: tooMany }).expect(400);
+    });
+  });
 });
 
 describe.each<StockReservationStrategy>(['atomic', 'locking'])(

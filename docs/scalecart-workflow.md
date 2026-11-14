@@ -508,7 +508,6 @@ checkouts failed); at pool size 2, 5 pods use 72–75 connections.
 | Not yet | Today | Coming in |
 |---|---|---|
 | Live refund test | Refunds (late payment, paid twice) are proven with a fake Razorpay in tests, not yet against real Razorpay | next live session |
-| Stable webhook URL | Webhooks reach the laptop through a cloudflared quick tunnel whose address changes every run | a real deployment |
 | "Your turn" push | The waiting room makes browsers ask "my turn?" every 0.5–5 s; in "one out, one in" mode freed places sit empty until then (line ~23/s instead of 50/s, E5b) | later (SSE / WebSocket) |
 | Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Shared DB connections (ProxySQL) | Each pod has its own pools (7 × 2 connections); the pod count is capped by a connection budget (E7c) | next small phase |

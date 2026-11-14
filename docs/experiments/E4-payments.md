@@ -110,6 +110,31 @@ payments existed). The job cancels each (after asking Razorpay, if it had a paym
 - "Stop if a batch changed nothing" matters: if Razorpay is down, the same oldest orders come back first every time,
   and the job would spin on them for the whole budget.
 
+## E4e — A fixed webhook address (ngrok free static domain), 2026-11-14
+
+The quick tunnel got a new address every run, so the dashboard's webhook URL kept going stale. Now
+`infra/tunnel.ps1` runs ngrok 3.39.13 with the account's free fixed domain (`NGROK_DOMAIN` in `.env`) → NGINX :8088.
+The dashboard URL was set once.
+
+- Setup gotchas: winget installed ngrok **3.3.1**, which the account refused (minimum agent version **3.29.0**,
+  ERR_NGROK_121); `ngrok update` fixed it. Browser-like GETs get ngrok's free-plan warning page (ERR_NGROK_6024);
+  server-to-server webhook POSTs don't.
+- Unsigned test POST through the tunnel → **400 "invalid webhook signature"** from our API.
+
+Live payment `pay_U0273aytdy2ocM` (card …1007, ₹163.38), times in UTC:
+
+| Time | Event |
+|---|---|
+| 11:07:09.619 | our order created |
+| 11:07:10 | Razorpay order created (1 s precision) |
+| 11:07:21 | Razorpay's `created_at` for the payment |
+| 11:07:27 | Razorpay's `created_at` for the webhook events |
+| 11:07:28.368 | **`payment.captured` received** |
+| 11:07:28.482 | processed: order **paid** (order row updated 11:07:28.430), outcome `paid` (**114 ms**; ngrok saw 142 ms round trip) |
+| 11:07:28.638 → .656 | `order.paid` for the same payment → **duplicate** (ngrok: 44 ms) |
+
+Both deliveries returned 200, each on the first try (`deliveries = 1`). One run only.
+
 ## Correctness tests (fake Razorpay, real HTTP + MySQL)
 
 - `test/payments.e2e-spec.ts`: **43 tests, Fastify and Express**. Pay → webhook → paid + stock committed;

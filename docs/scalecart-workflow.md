@@ -526,9 +526,7 @@ backup bucket: shoppers p95 7.0–7.2 ms, 0 errors (3 of 4 runs).
 | Not yet | Today | Coming in |
 |---|---|---|
 | Live refund test | Refunds (late payment, paid twice) are proven with a fake Razorpay in tests, not yet against real Razorpay | next live session |
-| Stable webhook URL | Webhooks reach the laptop through a cloudflared quick tunnel whose address changes every run | a real deployment |
 | "Your turn" push | The waiting room makes browsers ask "my turn?" every 0.5–5 s; in "one out, one in" mode freed places sit empty until then (line ~23/s instead of 50/s, E5b) | later (SSE / WebSocket) |
-| Per-IP login limits | Only per-email | needs the real client IP from NGINX |
 | Shared DB connections (ProxySQL) | Each pod has its own pools (7 × 2 connections); the pod count is capped by a connection budget (E7c) | next small phase |
 | Waiting-room drop cache | `POST /drops/:id/queue` reads the drop from MySQL on every call; 2 calls got 500 (connect timeout) with 5 pods (E7c) | small fix |
 | Product photos | The catalog has no images; the storefront shows a category emoji on a gradient | an image column + object storage |

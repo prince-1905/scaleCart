@@ -95,7 +95,8 @@ Open **http://localhost:8088/shop/**. Log in as:
 - **Customers:** `loadtest+1@scalecart.local` … `loadtest+2000@scalecart.local`, password = `SEED_USER_PASSWORD`.
 
 Optional in `.env`:
-- `RAZORPAY_*` for test-mode payments. Webhooks need a public URL, for example a Cloudflare quick tunnel to port 8088.
+- `RAZORPAY_*` for test-mode payments. Webhooks need a public URL: put your free ngrok fixed domain in
+  `NGROK_DOMAIN` and run `./infra/tunnel.ps1`, then set `https://<domain>/payments/razorpay/webhook` in the dashboard once.
 - `GEMINI_API_KEY` for the AI features.
 
 | URL | What |
@@ -150,8 +151,8 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin |
-| Next | Stable webhook tunnel · API-wide rate limiting · 2FA · microservice split (payments first) · API gateway · distributed tracing · cloud load tests |
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting |
+| Next | 2FA · microservice split (payments first) · API gateway · distributed tracing · cloud load tests |
 
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

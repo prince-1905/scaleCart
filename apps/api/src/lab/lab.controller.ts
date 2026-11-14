@@ -9,6 +9,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Public } from '../common/auth.js';
+import { SkipRateLimit } from '../rate-limit/rate-limit.js';
 
 const MAX_MS = 1000;
 
@@ -25,6 +26,7 @@ function parseMs(raw: string | undefined): number {
  * They isolate one behaviour each so its effect on the event loop can be measured.
  */
 @Public()
+@SkipRateLimit()
 @Controller('lab')
 export class LabController {
   constructor(@InjectDataSource('inventory') private readonly inventory: DataSource) {}

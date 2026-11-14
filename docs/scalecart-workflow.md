@@ -486,6 +486,24 @@ and Mailpit, runs the migrate and seed Jobs, then the API and the worker. API: h
 New pods got almost no traffic until connections were recycled. 5 pods at pool size 5 exhausted MySQL (761 of 1,000
 checkouts failed); at pool size 2, 5 pods use 72–75 connections.
 
+### O. Rate limiting (Phase 6): every request, before it does any work
+
+```
+ Browser / script ──► NGINX: has a token? count it in that token's bucket (50/s, burst 100)
+                       too many → 429 right here (~0.6 ms, Node never sees it)
+                   ──► API guard (after the login check):
+                       which bucket? auth (login/register/refresh, per IP) · checkout (per user) · default
+                       whose? logged-in → user id · logged-out → IP (X-Real-IP from NGINX)
+                       Redis Lua: refill (time passed × rate, max = capacity), take 1 token
+                       no token left → 429 + Retry-After · Redis too slow → this pod's own bucket decides
+                   ──► the route (database, Argon2, payments…)
+ Never limited: /health, /metrics, payment webhooks, lab routes.
+```
+
+**Measured (E9):** one scraper at 1,500 searches/s next to 50 shoppers. No limiter: 1,033–2,161 of ~3,000 shopper requests
+failed. App limiter only: 0–355 failed, but p95 4.5–10 s (Node busy refusing; 18,373 leaked via fail open). Edge limit +
+backup bucket: shoppers p95 7.0–7.2 ms, 0 errors (3 of 4 runs).
+
 ---
 
 ## 6. How we watch it (observability)

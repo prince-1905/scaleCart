@@ -13,6 +13,7 @@ import { ObservabilityModule } from './observability/observability.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { DropsModule } from './drops/drops.module.js';
+import { RateLimitModule } from './rate-limit/rate-limit.module.js';
 
 @Module({})
 export class AppModule {
@@ -25,6 +26,8 @@ export class AppModule {
         ObservabilityModule,
         HealthModule,
         IdentityModule,
+        // After IdentityModule: its guard runs after the AuthGuard, so it can see the user.
+        RateLimitModule,
         CatalogModule,
         InventoryModule,
         CartModule,

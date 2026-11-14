@@ -201,6 +201,14 @@ services:
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
       # Drops (Phase 4.6): Redis "door counter" in front of the MySQL stock row. false = every buyer goes to MySQL (E6).
       DROP_STOCK_GATE: ${DROP_STOCK_GATE:-true}
+      # API-wide token-bucket rate limit (Phase 6), "capacity:refillPerSecond" per policy. Load tests send
+      # everything from one IP: run the older ones with RATE_LIMIT_ENABLED=false.
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-60:20}
+      RATE_LIMIT_AUTH: ${RATE_LIMIT_AUTH:-10:0.2}
+      RATE_LIMIT_CHECKOUT: ${RATE_LIMIT_CHECKOUT:-5:0.5}
+      # NGINX sets X-Real-IP to the connecting address; the API is only reachable through NGINX.
+      TRUST_PROXY: "true"
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:

@@ -27,6 +27,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | One hot stock row: during a 5 s database stall, every loser waited too | Redis "door counter" in front of MySQL (Redis filters, MySQL still decides) | "Sold out" **p50 131–387 ms vs 3,980–4,228 ms**; requests in flight 120–161 vs 1,001; still **100/100 sold** | [E6](docs/experiments/E6-redis-stock-gate.md) |
 | Rolling updates on Kubernetes dropped requests | Graceful drain: `Connection: close` + not-ready for 5 s, then close | **27–67 failed requests → 0** (6/6 runs) | [E7](docs/experiments/E7-kubernetes.md) |
 | Autoscaling to 5 pods exhausted MySQL connections (761 of 1,000 checkouts failed) | Connection budget: pods × pools × pool size < `max_connections` | 5 pods use **72–75** connections | [E7](docs/experiments/E7-kubernetes.md) |
+| One scraper (1,500 searches/s) failed 1,033–2,161 of 3,000 shopper requests | Token bucket per user in Redis (Lua) + NGINX edge limit per token + a backup bucket in each pod | Shoppers' p95 **7.0–7.2 ms under attack** (9.8 ms with no attacker), 0 errors in 3 of 4 runs. App limiter alone wasn't enough: Node was 100% busy refusing, and fail open leaked 18,373 requests | [E9](docs/experiments/E9-rate-limiting.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -112,7 +113,7 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e   # 64 unit, 181 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
+cd apps/api; npm test; npm run test:e2e   # 68 unit, 201 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
 cd apps/web; npm test                     # 21 component tests with a fake API
 ```
 
@@ -129,7 +130,8 @@ Fastify and Express. Key tests are
 
 `run.ps1` prints a per-step table and checks that k6 itself wasn't the bottleneck. Switches for the experiments include
 `STOCK_RESERVATION=atomic|locking|naive`, `HTTP_ADAPTER=fastify|express`, `NOTIFY_MODE=outbox|sync`, `CACHE_ENABLED`,
-`DROP_STOCK_GATE`, `API_REPLICAS` and `API_CPUS`.
+`DROP_STOCK_GATE`, `RATE_LIMIT_ENABLED`, `API_REPLICAS` and `API_CPUS`. The rate limiter is on by default; older load
+tests send everything from one IP, so run them with `RATE_LIMIT_ENABLED=false`.
 
 ## Repository layout
 

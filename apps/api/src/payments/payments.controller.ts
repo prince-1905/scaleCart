@@ -16,6 +16,7 @@ import { CurrentUser, Public, type AuthUser } from '../common/auth.js';
 import { UUID_PATTERN } from '../common/uuid.js';
 import { PaymentsService } from './payments.service.js';
 import { WebhookService } from './webhook.service.js';
+import { RateLimit, SkipRateLimit } from '../rate-limit/rate-limit.js';
 
 const PROVIDER_ID = /^[A-Za-z0-9_]{1,40}$/;
 
@@ -45,6 +46,7 @@ export class PaymentsController {
   ) {}
 
   /** Opens a payment for one of your unpaid orders: returns what Razorpay Checkout needs. */
+  @RateLimit('checkout')
   @Post('orders/:id/payment')
   @HttpCode(201)
   start(@CurrentUser() user: AuthUser, @Param('id') id: string) {
@@ -106,6 +108,7 @@ export class PaymentsController {
 
   /** Razorpay calls this. No login: the HMAC signature over the raw body is the authentication. */
   @Public()
+  @SkipRateLimit()
   @Post('payments/razorpay/webhook')
   @HttpCode(200)
   webhook(

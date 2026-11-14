@@ -52,6 +52,13 @@ describe('loadEnv', () => {
       dropStockGateResetSeconds: 10,
       shutdownDrainSeconds: 5,
       httpMaxRequestsPerSocket: 0,
+      rateLimitEnabled: true,
+      rateLimits: {
+        default: { capacity: 60, refillPerSecond: 20 },
+        auth: { capacity: 10, refillPerSecond: 0.2 },
+        checkout: { capacity: 5, refillPerSecond: 0.5 },
+      },
+      trustProxy: false,
     });
   });
 

@@ -26,3 +26,16 @@ export class RefreshDto {
   @MaxLength(128)
   refreshToken: string;
 }
+
+/** A 6-digit code from the authenticator app, or a backup code ("abcd-efgh"). */
+export class TwoFactorCodeDto {
+  @IsString()
+  @Length(6, 12)
+  code: string;
+}
+
+export class LoginWithCodeDto extends TwoFactorCodeDto {
+  @IsString()
+  @MaxLength(2048)
+  challengeToken: string;
+}

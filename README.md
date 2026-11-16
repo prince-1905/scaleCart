@@ -28,6 +28,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | Rolling updates on Kubernetes dropped requests | Graceful drain: `Connection: close` + not-ready for 5 s, then close | **27–67 failed requests → 0** (6/6 runs) | [E7](docs/experiments/E7-kubernetes.md) |
 | Autoscaling to 5 pods exhausted MySQL connections (761 of 1,000 checkouts failed) | Connection budget: pods × pools × pool size < `max_connections` | 5 pods use **72–75** connections | [E7](docs/experiments/E7-kubernetes.md) |
 | One scraper (1,500 searches/s) failed 1,033–2,161 of 3,000 shopper requests | Token bucket per user in Redis (Lua) + NGINX edge limit per token + a backup bucket in each pod | Shoppers' p95 **7.0–7.2 ms under attack** (9.8 ms with no attacker), 0 errors in 3 of 4 runs. App limiter alone wasn't enough: Node was 100% busy refusing, and fail open leaked 18,373 requests | [E9](docs/experiments/E9-rate-limiting.md) |
+| A stolen password is enough to log in | Two-step login with an authenticator app (TOTP, RFC 6238), atomic attempt counter in MySQL, replay protection, encrypted secrets | 30 code guesses at once → **exactly 5 checked** (naive version: 30 of 30); server clock within 0.2 s of a ±30 s tolerance | [E10](docs/experiments/E10-two-factor.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -114,8 +115,8 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e   # 68 unit, 201 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
-cd apps/web; npm test                     # 21 component tests with a fake API
+cd apps/api; npm test; npm run test:e2e   # 74 unit, 221 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
+cd apps/web; npm test                     # 25 component tests with a fake API
 ```
 
 The end-to-end suite runs against real MySQL, Redis and RabbitMQ; the core shop, auth and payment suites run on both
@@ -151,8 +152,8 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting |
-| Next | 2FA · microservice split (payments first) · API gateway · distributed tracing · cloud load tests |
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app) |
+| Next | Microservice split (payments first) · API gateway · distributed tracing · cloud load tests |
 
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

@@ -9,6 +9,8 @@ import { AuthGuard } from './auth.guard.js';
 import { AuthService } from './auth.service.js';
 import { LoginThrottle } from './login-throttle.js';
 import { PasswordHasher } from './password-hasher.js';
+import { TwoFactorController } from './two-factor.controller.js';
+import { TwoFactorService } from './two-factor.service.js';
 import { UsersModule } from './users.module.js';
 
 @Module({
@@ -32,11 +34,12 @@ import { UsersModule } from './users.module.js';
       }),
     }),
   ],
-  controllers: [AuthController],
+  controllers: [AuthController, TwoFactorController],
   providers: [
     AuthService,
     PasswordHasher,
     LoginThrottle,
+    TwoFactorService,
     { provide: APP_GUARD, useClass: AuthGuard },
   ],
 })

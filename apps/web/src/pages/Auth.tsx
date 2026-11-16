@@ -8,7 +8,7 @@ import { useAuth } from '../lib/auth';
 /** Login and register share one form. `?next=/cart` brings the user back where they were. */
 export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   useTitle(mode === 'login' ? 'Log in' : 'Create account');
-  const { user, login, register } = useAuth();
+  const { user, login, register, loginWithCode } = useAuth();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const next = params.get('next')?.startsWith('/') ? params.get('next')! : '/';
@@ -16,6 +16,9 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Set when the password was right but the account has 2FA: the page then asks for the code. */
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState('');
 
   if (user) return <Navigate to={next} replace />;
 
@@ -24,7 +27,17 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
     setBusy(true);
     setError(null);
     try {
-      await (mode === 'login' ? login(email, password) : register(email, password));
+      if (challenge) {
+        await loginWithCode(challenge, code);
+      } else if (mode === 'login') {
+        const needsCode = await login(email, password);
+        if (needsCode) {
+          setChallenge(needsCode.challengeToken);
+          return;
+        }
+      } else {
+        await register(email, password);
+      }
       navigate(next, { replace: true });
     } catch (err) {
       setError(errorMessage(err));
@@ -34,6 +47,45 @@ export function AuthPage({ mode }: { mode: 'login' | 'register' }) {
   }
 
   const isLogin = mode === 'login';
+  if (challenge) {
+    return (
+      <div className="mx-auto max-w-sm animate-fade-up">
+        <div className="card p-8">
+          <h1 className="text-2xl font-bold">Two-step verification</h1>
+          <p className="mt-1 text-sm text-slate-500">Open your authenticator app and enter the 6-digit code for ScaleCart. Lost your phone? Use a backup code.</p>
+          <form className="mt-6 space-y-4" onSubmit={submit}>
+            <label className="block text-sm font-medium">
+              Code
+              <input
+                className="input mt-1 text-center font-mono text-lg tracking-widest"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                required
+                maxLength={12}
+                value={code}
+                onChange={(e) => setCode(e.target.value.trim())}
+              />
+            </label>
+            {error && <ErrorBox message={error} />}
+            <button className="btn-primary w-full" disabled={busy}>
+              {busy ? 'Checking…' : 'Verify'}
+            </button>
+          </form>
+          <button
+            className="mt-4 w-full text-center text-sm text-slate-500 hover:underline"
+            onClick={() => {
+              setChallenge(null);
+              setCode('');
+              setError(null);
+            }}
+          >
+            Start over
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="mx-auto max-w-sm animate-fade-up">
       <div className="card p-8">

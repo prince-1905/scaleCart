@@ -59,6 +59,9 @@ describe('loadEnv', () => {
         checkout: { capacity: 5, refillPerSecond: 0.5 },
       },
       trustProxy: false,
+      totpEncryptionKey: '',
+      twoFactorMaxFailures: 5,
+      twoFactorLockSeconds: 900,
     });
   });
 

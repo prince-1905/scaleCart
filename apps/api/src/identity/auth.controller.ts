@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
 import { CurrentUser, Public, type AuthUser } from '../common/auth.js';
-import { LoginDto, RefreshDto, RegisterDto } from './auth.dto.js';
+import { LoginDto, LoginWithCodeDto, RefreshDto, RegisterDto } from './auth.dto.js';
 import { AuthService } from './auth.service.js';
 import { RateLimit } from '../rate-limit/rate-limit.js';
 
@@ -26,6 +26,15 @@ export class AuthController {
   @HttpCode(200)
   login(@Body() dto: LoginDto) {
     return this.auth.login(dto.email, dto.password);
+  }
+
+  /** Step two for accounts with 2FA: the challenge token from /auth/login + a code. */
+  @Public()
+  @RateLimit('auth')
+  @Post('login/2fa')
+  @HttpCode(200)
+  loginWithCode(@Body() dto: LoginWithCodeDto) {
+    return this.auth.loginWithCode(dto.challengeToken, dto.code);
   }
 
   @Public()

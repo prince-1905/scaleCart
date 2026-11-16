@@ -49,6 +49,7 @@ export function Layout() {
                 {menuOpen && (
                   <div className="card absolute right-0 mt-2 w-48 p-1 animate-fade-up" onClick={() => setMenuOpen(false)}>
                     <Link to="/orders" className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">My orders</Link>
+                    <Link to="/account/security" className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">Security</Link>
                     {user.role === 'admin' && (
                       <Link to="/admin" className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800">Admin</Link>
                     )}

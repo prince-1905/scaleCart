@@ -203,6 +203,14 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  /** Two-factor login: enabled, disabled, code_ok, backup_code_ok, wrong_code, locked. */
+  readonly twoFactor = new Counter({
+    name: 'auth_two_factor_total',
+    help: 'Two-factor (authenticator app) events by result.',
+    labelNames: ['result'] as const,
+    registers: [this.registry],
+  });
+
   constructor() {
     // CPU, memory, heap, GC pauses and event-loop delay (p50/p90/p99, via perf_hooks).
     collectDefaultMetrics({

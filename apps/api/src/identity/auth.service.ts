@@ -10,6 +10,7 @@ import { isDuplicateKey, type WriteResult } from '../database/database.js';
 import { LoginThrottle } from './login-throttle.js';
 import { PasswordHasher } from './password-hasher.js';
 import { RefreshToken } from './refresh-token.entity.js';
+import { TwoFactorService } from './two-factor.service.js';
 import { User } from './user.entity.js';
 
 export interface TokenPair {
@@ -19,6 +20,18 @@ export interface TokenPair {
   expiresIn: number;
   refreshToken: string;
 }
+
+/** Password was right, but this account also needs a code from the authenticator app. */
+export interface TwoFactorChallenge {
+  twoFactorRequired: true;
+  /** Proof that the password step passed. Good for one user, 5 minutes, and only for POST /auth/login/2fa. */
+  challengeToken: string;
+  expiresIn: number;
+}
+
+/** Not "scalecart-api": a challenge token is refused as an access token by the AuthGuard. */
+const CHALLENGE_AUDIENCE = 'scalecart-2fa';
+const CHALLENGE_TTL_SECONDS = 300;
 
 export interface AccessTokenClaims {
   sub: string;
@@ -46,6 +59,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly hasher: PasswordHasher,
     private readonly throttle: LoginThrottle,
+    private readonly twoFactor: TwoFactorService,
   ) {
     this.users = db.getRepository(User);
     this.tokens = db.getRepository(RefreshToken);
@@ -69,7 +83,7 @@ export class AuthService {
     return this.issueTokens(user, uuidv7());
   }
 
-  async login(email: string, password: string): Promise<TokenPair> {
+  async login(email: string, password: string): Promise<TokenPair | TwoFactorChallenge> {
     const normalized = normalizeEmail(email);
     // Before any hashing: a blocked guess must not cost CPU.
     await this.throttle.assertAllowed(normalized);
@@ -83,6 +97,27 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_LOGIN);
     }
     await this.throttle.reset(normalized);
+    if (await this.twoFactor.isEnabled(user.id)) {
+      const challengeToken = await this.jwt.signAsync(
+        { sub: user.id },
+        { audience: CHALLENGE_AUDIENCE, expiresIn: CHALLENGE_TTL_SECONDS },
+      );
+      return { twoFactorRequired: true, challengeToken, expiresIn: CHALLENGE_TTL_SECONDS };
+    }
+    return this.issueTokens(user, uuidv7());
+  }
+
+  /** Second step of a 2FA login: the challenge from step one + a code from the app (or a backup code). */
+  async loginWithCode(challengeToken: string, code: string): Promise<TokenPair> {
+    let userId: string;
+    try {
+      ({ sub: userId } = await this.jwt.verifyAsync<{ sub: string }>(challengeToken, { audience: CHALLENGE_AUDIENCE }));
+    } catch {
+      throw new UnauthorizedException('invalid or expired login challenge; log in again');
+    }
+    await this.twoFactor.verifyForLogin(userId, code);
+    const user = await this.users.findOneBy({ id: userId });
+    if (!user) throw new UnauthorizedException(INVALID_LOGIN);
     return this.issueTokens(user, uuidv7());
   }
 
@@ -126,7 +161,13 @@ export class AuthService {
   async me(userId: string) {
     const user = await this.users.findOneBy({ id: userId });
     if (!user) throw new UnauthorizedException();
-    return { id: user.id, email: user.email, role: user.role, createdAt: user.createdAt };
+    return {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      createdAt: user.createdAt,
+      twoFactorEnabled: await this.twoFactor.isEnabled(user.id),
+    };
   }
 
   private async revokeFamily(familyId: string) {

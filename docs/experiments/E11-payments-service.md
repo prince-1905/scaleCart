@@ -157,6 +157,7 @@ Shop: 59 unit, 160 end-to-end. Payments: 16 unit, 24 end-to-end. All passed on 2
 The first full shop run right after the experiments had 1 failure: the rate-limit refill test (from Phase 6) got 200
 where it expected 429. It refilled a token every 200 ms, so a slow request could earn one back. It passed 3 of 3 runs
 on its own; I slowed it to one token per 500 ms. It then passed 3 of 3 alone, and the full suite passed (160 of 160).
+After merging `main` (with 2FA): shop 65 unit, 180 end-to-end; payments 16 unit, 24 end-to-end. All passed.
 Mutation checks during the build: random reply event id, cancelling an unknown order, no service-token check,
 a repeated payment re-sending its event, no circuit breaker. Each one made a test fail.
 

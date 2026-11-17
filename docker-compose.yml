@@ -210,6 +210,8 @@ services:
       RATE_LIMIT_CHECKOUT: ${RATE_LIMIT_CHECKOUT:-5:0.5}
       # NGINX sets X-Real-IP to the connecting address; the API is only reachable through NGINX.
       TRUST_PROXY: "true"
+      # Two-step login (Phase 6b): encrypts authenticator secrets; empty = derived from JWT_SECRET.
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:

@@ -116,6 +116,11 @@ export interface Env {
   rateLimits: Record<RateLimitPolicy, BucketSize>;
   /** Behind NGINX: take the client IP from X-Real-IP. Never enable without a proxy that sets it. */
   trustProxy: boolean;
+  /** Encrypts authenticator-app secrets at rest. Empty = derived from JWT_SECRET (rotating that then needs a re-encrypt). */
+  totpEncryptionKey: string;
+  /** Wrong 2FA codes before the account's code check is locked (counted in MySQL, even for parallel guesses). */
+  twoFactorMaxFailures: number;
+  twoFactorLockSeconds: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -254,6 +259,9 @@ export function loadEnv(
       checkout: bucketSize(source, 'RATE_LIMIT_CHECKOUT', '5:0.5'),
     },
     trustProxy: bool(source.TRUST_PROXY, false),
+    totpEncryptionKey: source.TOTP_ENCRYPTION_KEY ?? '',
+    twoFactorMaxFailures: positiveInt(source, 'TWO_FACTOR_MAX_FAILURES', 5),
+    twoFactorLockSeconds: positiveInt(source, 'TWO_FACTOR_LOCK_SECONDS', 900),
   };
 }
 

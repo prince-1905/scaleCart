@@ -44,6 +44,7 @@ const router = createBrowserRouter(
         { path: 'cart', lazy: async () => { const { CartPage } = await import('./pages/Cart'); return { Component: () => <RequireAuth><CartPage /></RequireAuth> }; } },
         { path: 'orders', lazy: async () => { const { OrdersPage } = await import('./pages/Orders'); return { Component: () => <RequireAuth><OrdersPage /></RequireAuth> }; } },
         { path: 'orders/:id', lazy: async () => { const { OrderPage } = await import('./pages/Orders'); return { Component: () => <RequireAuth><OrderPage /></RequireAuth> }; } },
+        { path: 'account/security', lazy: async () => { const { SecurityPage } = await import('./pages/Security'); return { Component: () => <RequireAuth><SecurityPage /></RequireAuth> }; } },
         { path: 'admin', lazy: async () => { const { AdminPage } = await import('./pages/Admin'); return { Component: () => <RequireAuth><AdminPage /></RequireAuth> }; } },
         { path: 'login', lazy: async () => { const { AuthPage } = await import('./pages/Auth'); return { Component: () => <AuthPage mode="login" /> }; } },
         { path: 'register', lazy: async () => { const { AuthPage } = await import('./pages/Auth'); return { Component: () => <AuthPage mode="register" /> }; } },

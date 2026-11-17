@@ -505,6 +505,24 @@ checkouts failed); at pool size 2, 5 pods use 72–75 connections.
 failed. App limiter only: 0–355 failed, but p95 4.5–10 s (Node busy refusing; 18,373 leaked via fail open). Edge limit +
 backup bucket: shoppers p95 7.0–7.2 ms, 0 errors (3 of 4 runs).
 
+### P. Two-step login with an authenticator app (Phase 6b)
+
+```
+ Turn on (Security page, signed in):
+   POST /auth/2fa/setup   → new secret (stored AES-GCM encrypted, not active yet) → QR code drawn in the browser
+   POST /auth/2fa/enable {code}  → first code proves the phone has it → ON + 10 backup codes (shown once, stored as HMACs)
+ Log in:
+   POST /auth/login {email, password}  → Argon2 check → 2FA on? → { twoFactorRequired, challengeToken (5 min) }, no tokens
+   POST /auth/login/2fa {challengeToken, code}
+       reserve an attempt: UPDATE … failed_codes + 1 WHERE failed_codes < 5 AND not locked   (0 rows → 429, locked 15 min)
+       code = HMAC-SHA1(secret, 30 s step) for step −1, 0, +1 and newer than the last used step?  or an unused backup code?
+       yes → mark the step used, reset the counter → access + refresh tokens   ·   no → 401 (the attempt stays counted)
+ Turn off / new backup codes: need a current code (wrong code → 400, so clients don't "refresh and resend")
+```
+
+**Measured (E10):** server clock within −214 … +112 ms of real time (tolerance ±30 s). Code step 13.7–41 ms p50.
+30 guesses at once → exactly 5 checked (naive read-then-update: 30 of 30).
+
 ### Q. Payments as its own service (Phase 8)
 
 Since Phase 8, journey J runs in a separate app, `apps/payments` (port 3002), with its own database user. NGINX sends
@@ -557,8 +575,7 @@ Pay fails in 2.1 s × 5, then ~3 ms (breaker).
 | Product photos | The catalog has no images; the storefront shows a category emoji on a gradient | an image column + object storage |
 | Browser end-to-end tests | The storefront has component tests with a fake API, no automated browser tests | Playwright |
 | HttpOnly refresh cookie | The storefront keeps tokens in localStorage (demo trade-off) | small API change |
-| More services, tracing | Only payments is split out (§Q); one trace across services needs tracing | next phases |
-
+| 2FA extras | Sessions from before 2FA was turned on stay valid; no email alert on enable/disable/lockout; not mandatory for admins; no passkeys | later |\n| More services, tracing | Only payments is split out (§Q); one trace across services needs tracing | next phases |\n
 ---
 
 ## 8. How to tell it in an interview (2 minutes)

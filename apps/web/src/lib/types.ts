@@ -25,6 +25,15 @@ export interface User {
   email: string;
   role: 'customer' | 'admin';
   createdAt: string;
+  /** Logging in needs a code from an authenticator app too. */
+  twoFactorEnabled?: boolean;
+}
+
+/** /auth/login's answer when the account has 2FA: no tokens yet, a code is needed first. */
+export interface TwoFactorChallenge {
+  twoFactorRequired: true;
+  challengeToken: string;
+  expiresIn: number;
 }
 
 export interface Tokens {

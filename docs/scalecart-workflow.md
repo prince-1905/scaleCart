@@ -575,7 +575,8 @@ Pay fails in 2.1 s × 5, then ~3 ms (breaker).
 | Product photos | The catalog has no images; the storefront shows a category emoji on a gradient | an image column + object storage |
 | Browser end-to-end tests | The storefront has component tests with a fake API, no automated browser tests | Playwright |
 | HttpOnly refresh cookie | The storefront keeps tokens in localStorage (demo trade-off) | small API change |
-| 2FA extras | Sessions from before 2FA was turned on stay valid; no email alert on enable/disable/lockout; not mandatory for admins; no passkeys | later |\n| More services, tracing | Only payments is split out (§Q); one trace across services needs tracing | next phases |\n
+| 2FA extras | Sessions from before 2FA was turned on stay valid; no email alert on enable/disable/lockout; not mandatory for admins; no passkeys | later |
+| More services, tracing | Only payments is split out (§Q); one trace across services needs tracing | next phases |
 ---
 
 ## 8. How to tell it in an interview (2 minutes)

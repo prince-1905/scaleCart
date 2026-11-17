@@ -122,7 +122,10 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e        # shop: 65 unit, 180 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)\ncd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 24 end-to-end\ncd apps/web; npm test                          # 25 component tests with a fake API\n```
+cd apps/api; npm test; npm run test:e2e        # shop: 65 unit, 180 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
+cd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 24 end-to-end
+cd apps/web; npm test                          # 25 component tests with a fake API
+```
 
 The end-to-end suite runs against real MySQL, Redis and RabbitMQ; the core shop and auth suites run on both
 Fastify and Express. Key tests are
@@ -158,6 +161,7 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service |\n| Next | API gateway · distributed tracing · cloud load tests |\n
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service |
+| Next | API gateway · distributed tracing · cloud load tests |
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

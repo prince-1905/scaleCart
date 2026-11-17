@@ -22,6 +22,8 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env (see .env.example)}
       MYSQL_USER: scalecart
       MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (see .env.example)}
+      # Phase 8: the payments service's own login (created by infra/mysql/init/02-payments-user.sh).
+      PAYMENTS_DB_PASSWORD: ${PAYMENTS_DB_PASSWORD:?set PAYMENTS_DB_PASSWORD in .env (see .env.example)}
     command:
       # Keep the whole working set in memory, so experiments measure queries, not disk.
       - --innodb-buffer-pool-size=512M
@@ -125,10 +127,11 @@ services:
       SMTP_HOST: mailpit
       SMTP_PORT: 1025
       CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-60}
-      # Payments (Phase 4): the worker expires unpaid orders (after asking Razorpay) and sends refunds.
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      # Orders (Phase 8): the worker settles orders from payment.captured events, and expires unpaid orders after
+      # asking the payments service ("paid after all?").
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
+      PAYMENTS_URL: http://payments:3002
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
       PAYMENT_JOBS_INTERVAL_SECONDS: ${PAYMENT_JOBS_INTERVAL_SECONDS:-30}
       NODE_OPTIONS: --max-old-space-size=192
     depends_on:
@@ -194,11 +197,9 @@ services:
       AI_MODEL: ${AI_MODEL:-gemini-3.6-flash}
       AI_THINKING_LEVEL: ${AI_THINKING_LEVEL:-minimal}
       AI_CHAT_PER_MINUTE: ${AI_CHAT_PER_MINUTE:-10}
-      # Payments (Phase 4). Empty keys = payments off (payment routes answer 503).
-      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
-      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
-      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      # Orders: the payment deadline is the shop's (the payments service reads it via /internal/orders/:id).
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
       # Drops (Phase 4.6): Redis "door counter" in front of the MySQL stock row. false = every buyer goes to MySQL (E6).
       DROP_STOCK_GATE: ${DROP_STOCK_GATE:-true}
       # API-wide token-bucket rate limit (Phase 6), "capacity:refillPerSecond" per policy. Load tests send
@@ -225,6 +226,63 @@ services:
           memory: 512M
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
+  # Phase 8: payments as its own service (apps/payments): own image, own MySQL login and database, own process.
+  # NGINX routes /orders/:id/payment and /payments/* here; it talks to the shop only via events and /internal calls.
+  payments-migrate:
+    build: ./apps/payments
+    image: scalecart/payments:dev
+    command: ["node", "dist/database/migrate.js"]
+    environment: &payments-db-env
+      DB_HOST: mysql
+      DB_PORT: 3306
+      PAYMENTS_DB_USER: payments
+      PAYMENTS_DB_PASSWORD: ${PAYMENTS_DB_PASSWORD:?set PAYMENTS_DB_PASSWORD in .env (see .env.example)}
+      PAYMENTS_DB_NAME: scalecart_payments
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  payments:
+    build: ./apps/payments
+    image: scalecart/payments:dev
+    environment:
+      <<: *payments-db-env
+      PORT: 3002
+      DB_POOL_SIZE: ${PAYMENTS_DB_POOL_SIZE:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HTTP_ACCESS_LOG: ${HTTP_ACCESS_LOG:-false}
+      # Verifies the shop's login tokens (verify only, same secret).
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
+      SHOP_URL: http://api:3000
+      SHOP_TIMEOUT_MS: ${SHOP_TIMEOUT_MS:-1000}
+      RABBITMQ_URL: amqp://scalecart:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672
+      # Razorpay lives here now (empty keys = payments off: the routes answer 503).
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      PAYMENT_JOBS_INTERVAL_SECONDS: ${PAYMENT_JOBS_INTERVAL_SECONDS:-30}
+      NODE_OPTIONS: --max-old-space-size=192
+    depends_on:
+      payments-migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_started
+    deploy:
+      replicas: ${PAYMENTS_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "${PAYMENTS_CPUS:-0.5}"
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 5

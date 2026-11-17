@@ -128,7 +128,20 @@ export class RabbitService implements OnApplicationShutdown {
     await ch.prefetch(prefetch);
     await ch.consume(queue, (msg) => {
       if (!msg) return; // consumer cancelled by the broker
-      const reply = { ack: () => ch.ack(msg), nack: (requeue: boolean) => ch.nack(msg, false, requeue) };
+      // Ignore ack/nack on a channel that is already closing (shutdown or a lost connection): the broker
+      // redelivers the unacknowledged message anyway. This was the intermittent e2e shutdown error
+      // ("IllegalOperationError: Connection closing" from reply.nack).
+      const safe = (fn: () => void) => {
+        try {
+          fn();
+        } catch (err) {
+          this.logger.debug(`ack/nack skipped, channel closing: ${(err as Error).message}`);
+        }
+      };
+      const reply = {
+        ack: () => safe(() => ch.ack(msg)),
+        nack: (requeue: boolean) => safe(() => ch.nack(msg, false, requeue)),
+      };
       handler(msg, reply).catch((err) => {
         this.logger.error(`unhandled error in ${queue} handler: ${(err as Error).message}`);
         reply.nack(true);

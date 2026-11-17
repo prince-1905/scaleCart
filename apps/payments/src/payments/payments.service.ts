@@ -9,31 +9,20 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, type EntityManager } from 'typeorm';
 import { uuidv7 } from '../common/uuid.js';
-import { ENV, type Env } from '../config/env.js';
-import { isDuplicateKey } from '../database/database.js';
-import { DropPurchases } from '../drops/drop-purchases.js';
-import { InventoryService } from '../inventory/inventory.service.js';
+import { ENV, type PaymentsEnv } from '../config/env.js';
+import { isDuplicateKey, retryOnDeadlock, type WriteResult } from '../database/database.js';
+import { EVENTS, type OrderPaymentResultEvent, type PaymentCapturedEvent } from '../messaging/topology.js';
 import { MetricsService } from '../observability/metrics.service.js';
-import { OrderLifecycle } from '../orders/order-lifecycle.js';
-import type { OrderStatus } from '../orders/order.entity.js';
-import {
-  GatewayError,
-  PAYMENT_GATEWAY,
-  type GatewayPayment,
-  type PaymentGateway,
-} from './payment-gateway.js';
+import { ShopClient } from '../shop/shop-client.js';
+import { GatewayError, PAYMENT_GATEWAY, type GatewayPayment, type PaymentGateway } from './payment-gateway.js';
 import type { PaymentAttempt, RefundReason } from './payment.entities.js';
 import { verifyCheckoutSignature } from './signatures.js';
 
 /** Don't open a payment for an order that's about to time out: the money could arrive after it's cancelled. */
 const MIN_PAYMENT_WINDOW_SECONDS = 60;
-const EXPIRE_BATCH = 100;
-/** Leaves room inside the 30 s job interval. */
-const EXPIRE_ROUND_MS = 20_000;
 
-/** What the browser needs to open the provider's checkout for one order. */
 export interface PaymentSession {
   orderId: string;
   provider: 'razorpay';
@@ -41,52 +30,45 @@ export interface PaymentSession {
   providerOrderId: string;
   amountPaise: number;
   currency: string;
-  /** The order is cancelled if not paid by then. */
   expiresAt: string;
 }
 
 /**
- * paid = this payment paid the order · duplicate = already applied (a repeat) ·
- * refund = money we must give back · failed = the attempt failed ·
- * ignored = nothing to do (not final yet) · unknown_order = not one of our provider orders
+ * captured  = new money: payment.captured is on its way to the shop, which decides paid vs refund
+ * duplicate = already recorded (a repeat) · refund = we must give it back (wrong amount)
+ * failed = the attempt failed · ignored = not final yet · unknown_order = not one of our provider orders
  */
-export type PaymentOutcome = 'paid' | 'duplicate' | 'refund' | 'failed' | 'ignored' | 'unknown_order';
-
+export type PaymentOutcome = 'captured' | 'duplicate' | 'refund' | 'failed' | 'ignored' | 'unknown_order';
 export type PaymentSource = 'webhook' | 'browser' | 'reconcile';
 
 /**
- * Payments: open a payment for an order, and record what the provider reports.
- *
- * A payment's result can reach us three ways, in any order and any number of times:
- * the provider's webhook (the source of truth), the browser after checkout (faster, for
- * the UI), and the timeout job asking the provider (for lost webhooks). All three end in
- * applyPayment(), which is safe to repeat: the payment row is keyed by the provider's
- * payment id, and the order changes only through one conditional UPDATE.
+ * The payments service's core. Compared with the monolith version:
+ * - the order (amount, owner, status, deadline) comes from the shop over HTTP (ShopClient), only to start a payment;
+ * - "this payment is captured" is an EVENT, written to the outbox in the same transaction as the payment row.
+ *   The shop marks the order paid and answers with order.payment_result; paid_by_other / cancelled → refund.
+ * So a webhook is accepted and stored even while the shop is down: the order catches up when it's back.
  */
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
 
   constructor(
-    @InjectDataSource('payments') private readonly db: DataSource,
+    @InjectDataSource() private readonly db: DataSource,
     @Inject(PAYMENT_GATEWAY) private readonly gateway: PaymentGateway | null,
-    private readonly orders: OrderLifecycle,
-    private readonly inventory: InventoryService,
-    private readonly dropPurchases: DropPurchases,
+    private readonly shop: ShopClient,
     private readonly metrics: MetricsService,
-    @Inject(ENV) private readonly env: Env,
+    @Inject(ENV) private readonly env: PaymentsEnv,
   ) {}
 
   /** "Pay" was clicked: create (or reuse) a provider order for this order. */
   async startPayment(userId: string, orderId: string): Promise<PaymentSession> {
     const gateway = this.requireGateway();
-    const order = await this.orders.get(orderId);
-    // Someone else's order looks exactly like a missing one.
+    const order = await this.shop.getOrder(orderId);
     if (!order || order.userId !== userId) throw new NotFoundException('order not found');
     if (order.status !== 'pending_payment') {
       throw new ConflictException({ statusCode: 409, error: `order_${order.status}`, message: `order is ${order.status}` });
     }
-    const expiresAt = new Date(order.createdAt.getTime() + this.env.paymentTimeoutSeconds * 1000);
+    const expiresAt = new Date(order.payBy);
     if (expiresAt.getTime() - Date.now() < MIN_PAYMENT_WINDOW_SECONDS * 1000) {
       throw new ConflictException({
         statusCode: 409,
@@ -96,7 +78,6 @@ export class PaymentsService {
     }
 
     const latest = await this.latestAttempt(orderId);
-    // Reuse the last provider order unless a payment already failed on it (then Razorpay wants a new one).
     if (latest?.providerOrderId && !(await this.hasPayments(latest.id))) {
       return this.session(orderId, latest.providerOrderId, latest.amountPaise, latest.currency, expiresAt, gateway);
     }
@@ -104,7 +85,6 @@ export class PaymentsService {
     const attemptNo = (latest?.attemptNo ?? 0) + 1;
     const attemptId = uuidv7();
     try {
-      // The INSERT is the lock: of two "Pay" clicks at the same moment, one creates attempt N.
       await this.db.query(
         `INSERT INTO payment_attempts (id, order_id, user_id, attempt_no, amount_paise, currency)
          VALUES (?, ?, ?, ?, ?, 'INR')`,
@@ -119,7 +99,6 @@ export class PaymentsService {
     try {
       const created = await gateway.createOrder({
         amountPaise: order.totalCents,
-        // Max 40 characters, unique per attempt: the provider rejects a second order with the same receipt.
         receipt: `${orderId.replaceAll('-', '')}-${attemptNo}`,
         notes: { order_id: orderId, attempt: String(attemptNo) },
       });
@@ -141,17 +120,13 @@ export class PaymentsService {
   }
 
   /**
-   * The browser says "paid" (Razorpay Checkout's handler, or its redirect back to us).
-   * Check its signature, then ask the provider for the real status: the browser only
-   * makes the page update sooner.
-   *
-   * `userId` is null for the redirect callback, which arrives without our login token.
-   * That's safe: only Razorpay can produce a valid signature for this provider order.
+   * The browser says "paid". Check the signature, ask the provider for the real status, record it. The order itself
+   * is settled by the shop when the event arrives, usually within a second: the page shows "confirming" and polls.
    */
   async confirmFromBrowser(
     userId: string | null,
     input: { providerOrderId: string; paymentId: string; signature: string },
-  ): Promise<{ orderId: string; outcome: PaymentOutcome | 'processing'; orderStatus: OrderStatus }> {
+  ): Promise<{ orderId: string; outcome: PaymentOutcome | 'processing' }> {
     const gateway = this.requireGateway();
     const attempt = await this.attemptByProviderOrder(input.providerOrderId);
     if (!attempt || (userId !== null && attempt.userId !== userId)) throw new NotFoundException('payment not found');
@@ -165,18 +140,17 @@ export class PaymentsService {
       const payment = await gateway.fetchPayment(input.paymentId);
       if (payment.providerOrderId !== attempt.providerOrderId) throw new BadRequestException('payment is for another order');
       outcome = await this.applyPayment(payment, 'browser');
-      if (outcome === 'ignored') outcome = 'processing'; // authorized, not captured yet: the webhook will finish it
+      // Recorded; the shop confirms the order asynchronously.
+      if (outcome === 'captured' || outcome === 'duplicate' || outcome === 'ignored') outcome = 'processing';
     } catch (err) {
       if (!(err instanceof GatewayError)) throw err;
-      // The provider's API is slow or down. The webhook (or the timeout job) will still settle it.
       this.logger.warn(`could not fetch payment ${input.paymentId}: ${err.message}`);
       outcome = 'processing';
     }
-    const order = await this.orders.get(attempt.orderId);
-    return { orderId: attempt.orderId, outcome, orderStatus: order!.status };
+    return { orderId: attempt.orderId, outcome };
   }
 
-  /** Records one payment the provider reported and moves the order accordingly. Safe to repeat. */
+  /** Records one payment the provider reported. Safe to repeat: the payment row is keyed by the provider's id. */
   async applyPayment(p: GatewayPayment, source: PaymentSource): Promise<PaymentOutcome> {
     const outcome = await this.apply(p);
     this.count(outcome, source);
@@ -186,7 +160,6 @@ export class PaymentsService {
   private async apply(p: GatewayPayment): Promise<PaymentOutcome> {
     const attempt = await this.attemptByProviderOrder(p.providerOrderId);
     if (!attempt) {
-      // Not ours: e.g. another integration on the same Razorpay account. Acknowledge and move on.
       this.logger.warn(`payment ${p.id} is for unknown provider order ${p.providerOrderId}`);
       return 'unknown_order';
     }
@@ -199,104 +172,91 @@ export class PaymentsService {
       );
       return 'failed';
     }
-    // created / authorized: not money yet (auto-capture follows). refunded: nothing for us to do.
     if (p.status !== 'captured') return 'ignored';
 
-    // Insert, or upgrade a row we saw as failed; never downgrade (events can arrive out of order).
-    await this.db.query(
-      `INSERT INTO payments (id, attempt_id, order_id, amount_paise, currency, status)
-       VALUES (?, ?, ?, ?, ?, 'captured')
-         ON DUPLICATE KEY UPDATE status = IF(payments.status = 'failed', 'captured', payments.status)`,
-      [p.id, attempt.id, attempt.orderId, p.amountPaise, p.currency],
-    );
-
-    if (p.amountPaise !== attempt.amountPaise || p.currency !== attempt.currency) {
-      this.logger.error(
-        `payment ${p.id} took ${p.amountPaise} ${p.currency}, expected ${attempt.amountPaise} ${attempt.currency}`,
-      );
-      return this.refundLater(p.id, 'amount_mismatch');
-    }
-
-    // The order row decides whether this is new: exactly one caller ever gets 'paid'.
-    switch (await this.orders.markPaid(attempt.orderId, p.id)) {
-      case 'paid':
-        await this.inventory.commit(attempt.orderId);
-        return 'paid';
-      case 'already_paid':
-        // A repeat. Commit again anyway: if the first run crashed before committing, this finishes it.
-        await this.inventory.commit(attempt.orderId);
-        return 'duplicate';
-      case 'paid_by_other':
-        return this.refundLater(p.id, 'paid_twice');
-      case 'cancelled':
-      case 'not_found':
-        return this.refundLater(p.id, 'order_cancelled');
-    }
-  }
-
-  /**
-   * The payment-timeout job. For each unpaid order past its deadline: first ask the
-   * provider whether it was paid after all (a webhook may have been lost), then cancel
-   * it and give its stock back. If the provider can't be reached, the order is left for
-   * the next run: never cancel what we couldn't check.
-   */
-  async expireOverdueOrders(): Promise<{ paid: number; cancelled: number; skipped: number }> {
-    const result = { paid: 0, cancelled: 0, skipped: 0 };
-    const started = Date.now();
-    // Batches of 100 until none are left. One batch per round drained only ~200 orders/min,
-    // so 40k abandoned load-test orders would have taken hours (found in the first live run).
-    // Stop early when a batch changed nothing (e.g. the provider is down: the same orders
-    // would come back first every time) or the round has used its time budget.
-    for (;;) {
-      const batch = await this.orders.overdue(this.env.paymentTimeoutSeconds, EXPIRE_BATCH);
-      const before = result.paid + result.cancelled;
-      await this.expireBatch(batch, result);
-      const progressed = result.paid + result.cancelled > before;
-      if (batch.length < EXPIRE_BATCH || !progressed || Date.now() - started > EXPIRE_ROUND_MS) break;
-    }
-    if (result.paid) this.logger.warn(`found ${result.paid} paid order(s) whose webhook never arrived`);
-    if (result.cancelled) {
-      this.logger.log(`expired ${result.cancelled} unpaid order(s) in ${Date.now() - started} ms`);
-    }
-    this.metrics.paymentJobs.inc({ job: 'expired_orders' }, result.cancelled);
-    this.metrics.paymentJobs.inc({ job: 'reconciled_paid' }, result.paid);
-    return result;
-  }
-
-  private async expireBatch(orderIds: string[], result: { paid: number; cancelled: number; skipped: number }) {
-    for (const orderId of orderIds) {
-      const attempts: { providerOrderId: string }[] = await this.db.query(
-        `SELECT provider_order_id AS providerOrderId FROM payment_attempts
-          WHERE order_id = ? AND provider_order_id IS NOT NULL`,
-        [orderId],
-      );
+    const wrongAmount = p.amountPaise !== attempt.amountPaise || p.currency !== attempt.currency;
+    // One transaction: the payment row AND (for new money) the event to the shop. Either both or neither.
+    // A deadlock victim's transaction is rolled back whole, so running it again is safe (it then sees the row).
+    return retryOnDeadlock(() => this.db.transaction(async (m) => {
+      // New money = the row is inserted now, or a row we saw as 'failed' becomes 'captured' (events arrive out of
+      // order). Not ON DUPLICATE KEY UPDATE's affectedRows: mysql2 sets CLIENT_FOUND_ROWS, so "already captured,
+      // nothing changed" also counts 1 there, and a repeat would look new.
       try {
-        for (const a of attempts) {
-          if (!this.gateway) throw new GatewayError('payments are not configured');
-          for (const p of await this.gateway.fetchOrderPayments(a.providerOrderId)) {
-            if ((await this.applyPayment(p, 'reconcile')) === 'paid') result.paid++;
-          }
-        }
+        await m.query(
+          `INSERT INTO payments (id, attempt_id, order_id, amount_paise, currency, status) VALUES (?, ?, ?, ?, ?, 'captured')`,
+          [p.id, attempt.id, attempt.orderId, p.amountPaise, p.currency],
+        );
       } catch (err) {
-        if (!(err instanceof GatewayError)) throw err;
-        this.logger.warn(`could not check payments of overdue order ${orderId}: ${err.message}`);
-        result.skipped++;
-        continue;
+        if (!isDuplicateKey(err)) throw err;
+        // A parallel copy waited on the row lock and got "duplicate": it now holds a SHARED lock on the row. Read
+        // first; only a 'failed' row needs the UPDATE (an exclusive lock). Updating straight away made two such
+        // copies wait for each other's shared lock: a deadlock, answered 500 (found by the 20-at-once test).
+        const [row] = await m.query('SELECT status FROM payments WHERE id = ? FOR SHARE', [p.id]);
+        if (row?.status !== 'failed') return 'duplicate';
+        const upgraded: WriteResult = await m.query(
+          `UPDATE payments SET status = 'captured' WHERE id = ? AND status = 'failed'`,
+          [p.id],
+        );
+        if (upgraded.affectedRows === 0) return 'duplicate';
       }
-      if (await this.orders.cancelIfUnpaid(orderId)) {
-        await this.inventory.release(orderId);
-        // Not bought after all: a drop customer may try that drop again.
-        await this.dropPurchases.releaseOrder(orderId);
-        result.cancelled++;
+
+      if (wrongAmount) {
+        this.logger.error(`payment ${p.id} took ${p.amountPaise} ${p.currency}, expected ${attempt.amountPaise} ${attempt.currency}`);
+        return this.refundLater(m, p.id, 'amount_mismatch');
       }
-    }
+      const event: PaymentCapturedEvent = { orderId: attempt.orderId, paymentId: p.id, amountPaise: p.amountPaise };
+      await m.query('INSERT INTO outbox (id, event_type, aggregate_id, payload) VALUES (?, ?, ?, ?)', [
+        uuidv7(),
+        EVENTS.paymentCaptured,
+        attempt.orderId,
+        JSON.stringify(event),
+      ]);
+      return 'captured';
+    }));
   }
 
   /**
-   * Gives back money we must not keep. Runs in the worker, not in the webhook: the
-   * webhook must answer within 5 s, and a refund call to the provider can be slow or fail.
-   * The receipt makes a repeat (two workers, or a crash after the call) harmless.
+   * The shop's answer to payment.captured. paid / already_paid: nothing to do. paid_by_other (the order was paid by
+   * another payment) or cancelled (it timed out first): this money must go back. Repeats are harmless: refundLater
+   * only changes a 'captured' row, and the caller skips event ids it has seen.
    */
+  async onOrderPaymentResult(event: OrderPaymentResultEvent, m: EntityManager = this.db.manager): Promise<void> {
+    if (event.result === 'paid' || event.result === 'already_paid') return;
+    const reason: RefundReason = event.result === 'paid_by_other' ? 'paid_twice' : 'order_cancelled';
+    await this.refundLater(m, event.paymentId, reason);
+  }
+
+  /**
+   * Asked by the shop's expiry job before it cancels an unpaid order: "was it paid after all?" Checks with the
+   * provider (a webhook may have been lost) and records what it finds. `paid: true` = keep the order: a
+   * payment.captured event is (or already was) on its way. Throws 502 if the provider can't be asked, and then the
+   * shop must not cancel (never cancel what we couldn't check).
+   */
+  async reconcileOrder(orderId: string): Promise<{ paid: boolean }> {
+    const attempts: { providerOrderId: string }[] = await this.db.query(
+      `SELECT provider_order_id AS providerOrderId FROM payment_attempts
+        WHERE order_id = ? AND provider_order_id IS NOT NULL`,
+      [orderId],
+    );
+    try {
+      for (const a of attempts) {
+        if (!this.gateway) throw new GatewayError('payments are not configured');
+        for (const p of await this.gateway.fetchOrderPayments(a.providerOrderId)) await this.applyPayment(p, 'reconcile');
+      }
+    } catch (err) {
+      if (!(err instanceof GatewayError)) throw err;
+      this.logger.warn(`could not check payments of order ${orderId}: ${err.message}`);
+      throw new BadGatewayException({ statusCode: 502, error: 'payment_provider_unavailable', message: err.message });
+    }
+    const captured = await this.db.query(
+      `SELECT 1 FROM payments WHERE order_id = ? AND status = 'captured' LIMIT 1`,
+      [orderId],
+    );
+    if (captured.length > 0) this.metrics.paymentJobs.inc({ job: 'reconciled_paid' });
+    return { paid: captured.length > 0 };
+  }
+
+  /** Gives back money we must not keep. A job, not the webhook: the provider call can be slow or fail. */
   async sendPendingRefunds(limit = 20): Promise<{ refunded: number; failed: number }> {
     const result = { refunded: 0, failed: 0 };
     if (!this.gateway) return result;
@@ -323,8 +283,8 @@ export class PaymentsService {
     return result;
   }
 
-  private async refundLater(paymentId: string, reason: RefundReason): Promise<PaymentOutcome> {
-    await this.db.query(
+  private async refundLater(m: EntityManager, paymentId: string, reason: RefundReason): Promise<PaymentOutcome> {
+    await m.query(
       `UPDATE payments SET status = 'refund_pending', refund_reason = ? WHERE id = ? AND status = 'captured'`,
       [reason, paymentId],
     );

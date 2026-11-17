@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, type EntityManager } from 'typeorm';
 import type { WriteResult } from '../database/database.js';
 import type { OrderStatus } from './order.entity.js';
 
@@ -33,8 +33,8 @@ export type MarkPaidResult = 'paid' | 'already_paid' | 'paid_by_other' | 'cancel
 export class OrderLifecycle {
   constructor(@InjectDataSource('orders') private readonly db: DataSource) {}
 
-  async get(orderId: string): Promise<OrderSummary | null> {
-    const [row] = await this.db.query(
+  async get(orderId: string, m: EntityManager = this.db.manager): Promise<OrderSummary | null> {
+    const [row] = await m.query(
       `SELECT id, user_id AS userId, status, total_cents AS totalCents, payment_id AS paymentId, created_at AS createdAt
          FROM orders WHERE id = ?`,
       [orderId],
@@ -42,15 +42,16 @@ export class OrderLifecycle {
     return row ?? null;
   }
 
-  async markPaid(orderId: string, paymentId: string): Promise<MarkPaidResult> {
-    const result: WriteResult = await this.db.query(
+  /** `m`: run inside the caller's transaction (the payment.captured consumer also writes its reply event). */
+  async markPaid(orderId: string, paymentId: string, m: EntityManager = this.db.manager): Promise<MarkPaidResult> {
+    const result: WriteResult = await m.query(
       `UPDATE orders SET status = 'paid', payment_id = ? WHERE id = ? AND status = 'pending_payment'`,
       [paymentId, orderId],
     );
     if (result.affectedRows === 1) return 'paid';
 
     // Lost (or repeated): find out why. The row can't go back to pending, so this read is stable.
-    const order = await this.get(orderId);
+    const order = await this.get(orderId, m);
     if (!order) return 'not_found';
     if (order.status === 'cancelled') return 'cancelled';
     return order.paymentId === paymentId ? 'already_paid' : 'paid_by_other';

@@ -378,6 +378,7 @@ Every job is safe to run twice at the same time, so several workers need no coor
 shop. We believe the bank, keep listening until it gets through, and count each payment once.
 **Measured (E4):** 100 webhooks for one payment at once → exactly 1 "paid", 6/6 runs; a live webhook was processed
 in 58 ms; the expiry job cleared 39,807 abandoned orders in ~8 min.
+**Since Phase 8** steps 1–4 run in the separate payments service, and "paid" reaches the order through an event (§Q).
 
 ### K. A drop and its waiting room ⭐ (Phase 4.5)
 
@@ -504,6 +505,30 @@ checkouts failed); at pool size 2, 5 pods use 72–75 connections.
 failed. App limiter only: 0–355 failed, but p95 4.5–10 s (Node busy refusing; 18,373 leaked via fail open). Edge limit +
 backup bucket: shoppers p95 7.0–7.2 ms, 0 errors (3 of 4 runs).
 
+### Q. Payments as its own service (Phase 8)
+
+Since Phase 8, journey J runs in a separate app, `apps/payments` (port 3002), with its own database user. NGINX sends
+`/orders/:id/payment` and `/payments/*` there; everything else still goes to the shop.
+
+```
+ 1. "Pay"   NGINX → payments → shop  GET /internal/orders/:id  (X-Service-Token; 1 s timeout, 1 retry, breaker 5 → 10 s)
+            shop answers {amount, owner, status, payBy} → payments creates the Razorpay order
+            shop can't answer → 503 "try again shortly", nothing created
+ 2. Webhook / callback → payments: save payment + event "payment.captured" in ONE transaction (outbox) → 200
+ 3. Relay (every 200 ms) → RabbitMQ → shop worker:
+      mark order paid (conditional UPDATE) + reply event "order.payment_result" in ONE transaction, then commit stock
+ 4. Payments reads the reply: "paid" → done · "paid_by_other" / "cancelled" → refund
+ 5. Shop worker, every 30 s: overdue order? ask payments POST /internal/orders/:id/reconcile first
+      paid after all → keep · payments can't answer → keep, try next round · not paid → cancel, free the stock
+ /internal/* from outside → 404 at NGINX.
+```
+
+**Analogy:** the bakery next door. One phone call when the customer is at the till ("how much is order X?"); notes in a
+mailbox for everything else, so nothing is lost if one shop is closed for a minute.
+**Measured (E11):** the hop costs ~0.7–0.9 ms (p99 8–26 ms). Order paid ~95–112 ms after the webhook. Shop down 60 s:
+60/60 webhooks accepted, orders paid 4–5 s after restart. Payments down: browsing and checkout unchanged. Frozen shop:
+Pay fails in 2.1 s × 5, then ~3 ms (breaker).
+
 ---
 
 ## 6. How we watch it (observability)
@@ -532,7 +557,7 @@ backup bucket: shoppers p95 7.0–7.2 ms, 0 errors (3 of 4 runs).
 | Product photos | The catalog has no images; the storefront shows a category emoji on a gradient | an image column + object storage |
 | Browser end-to-end tests | The storefront has component tests with a fake API, no automated browser tests | Playwright |
 | HttpOnly refresh cookie | The storefront keeps tokens in localStorage (demo trade-off) | small API change |
-| 2FA, microservices, tracing | – | later |
+| More services, tracing | Only payments is split out (§Q); one trace across services needs tracing | next phases |
 
 ---
 

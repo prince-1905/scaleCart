@@ -1,5 +1,30 @@
 import type { Channel } from 'amqplib';
 
+/**
+ * Events shared with the payments service (Phase 8): a contract both copies must keep identical
+ * (apps/payments/src/messaging/topology.ts has the same names and queue arguments).
+ *   payment.captured      payments → shop    "this payment took money for order X"
+ *   order.payment_result  shop → payments    "order X: paid | already_paid | paid_by_other | cancelled"
+ */
+export const PAYMENT_EVENTS = {
+  paymentCaptured: 'payment.captured',
+  orderPaymentResult: 'order.payment_result',
+} as const;
+
+export interface PaymentCapturedEvent {
+  orderId: string;
+  paymentId: string;
+  amountPaise: number;
+}
+
+export type OrderPaymentResult = 'paid' | 'already_paid' | 'paid_by_other' | 'cancelled';
+
+export interface OrderPaymentResultEvent {
+  orderId: string;
+  paymentId: string;
+  result: OrderPaymentResult;
+}
+
 /** Exchange and queue names. `prefix` keeps e2e tests apart from the dev stack. */
 export function topology(prefix: string) {
   const notifications = `${prefix}notifications.order-created`;
@@ -9,6 +34,10 @@ export function topology(prefix: string) {
     notifications,
     notificationsRetry: `${notifications}.retry`,
     notificationsDead: `${notifications}.dlq`,
+    /** Consumed by this worker. */
+    shopPayments: `${prefix}orders.payment-captured`,
+    /** Consumed by the payments service. */
+    paymentResults: `${prefix}payments.order-results`,
   };
 }
 
@@ -54,4 +83,20 @@ export async function assertTopology(ch: Channel, t: Topology): Promise<void> {
     durable: true,
     arguments: { 'x-queue-type': 'quorum' },
   });
+
+  // Ours, and the payments service's: a topic exchange drops events no queue is bound for, so each side also
+  // declares the queue of the events it publishes (identically), and an event always has a place to wait.
+  await consumerQueue(ch, t.events, t.shopPayments, PAYMENT_EVENTS.paymentCaptured);
+  await consumerQueue(ch, t.events, t.paymentResults, PAYMENT_EVENTS.orderPaymentResult);
+}
+
+/** A quorum queue with a 5 s retry queue and a dead-letter queue: the same arguments as in apps/payments. */
+async function consumerQueue(ch: Channel, exchange: string, queue: string, routingKey: string) {
+  await ch.assertQueue(queue, { durable: true, arguments: { 'x-queue-type': 'quorum' } });
+  await ch.bindQueue(queue, exchange, routingKey);
+  await ch.assertQueue(`${queue}.retry`, {
+    durable: true,
+    arguments: { 'x-message-ttl': RETRY_DELAY_MS, 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': queue },
+  });
+  await ch.assertQueue(`${queue}.dlq`, { durable: true, arguments: { 'x-queue-type': 'quorum' } });
 }

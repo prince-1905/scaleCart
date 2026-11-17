@@ -49,17 +49,19 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('rate limit on %s', (adap
   });
 
   it('tokens come back with time, at the refill rate', async () => {
-    const app = await start({ RATE_LIMIT_DEFAULT: '2:5' }); // one token every 200 ms
+    // One token every 500 ms: slow enough that a busy machine (a request taking a few hundred ms) can't refill a
+    // token between two requests that expect 429. With 200 ms per token this flaked once in a full run (2026-11-17).
+    const app = await start({ RATE_LIMIT_DEFAULT: '2:2' });
     await http(app).get('/products').expect(200);
     await http(app).get('/products').expect(200);
     await http(app).get('/products').expect(429);
 
-    await sleep(250);
+    await sleep(600);
     await http(app).get('/products').expect(200);
     await http(app).get('/products').expect(429);
 
-    // Quiet for 1 s would "earn" 5 tokens, but the bucket holds at most 2.
-    await sleep(1000);
+    // Quiet for 1.5 s would "earn" 3 tokens, but the bucket holds at most 2.
+    await sleep(1500);
     await http(app).get('/products').expect(200);
     await http(app).get('/products').expect(200);
     await http(app).get('/products').expect(429);
@@ -126,13 +128,11 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('rate limit on %s', (adap
     expect(refused.body.error).toBe('rate_limited');
   });
 
-  it('never limits health checks, metrics or payment webhooks', async () => {
+  it('never limits health checks or metrics', async () => {
     const app = await start({ RATE_LIMIT_DEFAULT: '1:0.01' });
     for (let i = 0; i < 5; i++) {
       await http(app).get('/health/live').expect(200);
       await http(app).get('/metrics').expect(200);
-      // Payments are off in this app (503): what matters is that it is never a 429.
-      expect((await http(app).post('/payments/razorpay/webhook').send({})).status).not.toBe(429);
     }
   });
 

@@ -129,29 +129,43 @@ export class MetricsService {
     registers: [this.registry],
   });
 
-  // ---- Phase 4: payments ----
+  // ---- Phase 4 → 8: payments (the payments service itself has its own metrics since the split) ----
 
-  /** paid, duplicate, refund, failed, ignored, unknown_order, started… by where the news came from. */
-  readonly payments = new Counter({
-    name: 'payments_total',
-    help: 'Payment results by outcome and source (webhook, browser, reconcile).',
-    labelNames: ['outcome', 'source'] as const,
-    registers: [this.registry],
-  });
-
-  /** Webhook deliveries by event and result (an outcome, duplicate, bad_signature, malformed). */
-  readonly paymentWebhooks = new Counter({
-    name: 'payment_webhooks_total',
-    help: 'Payment provider webhook deliveries by event and result.',
-    labelNames: ['event', 'result'] as const,
-    registers: [this.registry],
-  });
-
-  /** Orders expired, paid orders found by reconciliation, refunds sent or failed. */
+  /** Shop side of payments: orders expired, expiry rounds that skipped orders because payments couldn't answer. */
   readonly paymentJobs = new Counter({
     name: 'payment_jobs_total',
-    help: 'Work done by the payment jobs, by job.',
+    help: 'Work done by the shop worker for payments, by job.',
     labelNames: ['job'] as const,
+    registers: [this.registry],
+  });
+
+  /** payment.captured events handled by the shop worker: paid, already_paid, paid_by_other, cancelled, retried… */
+  readonly paymentEvents = new Counter({
+    name: 'shop_payment_events_total',
+    help: 'payment.captured events consumed by the shop worker, by result.',
+    labelNames: ['result'] as const,
+    registers: [this.registry],
+  });
+
+  /** From the payments service writing payment.captured to the shop settling the order (E11). */
+  readonly paymentSettleDelay = new Histogram({
+    name: 'shop_payment_settle_delay_seconds',
+    help: 'Delay from payment.captured being created to the order being settled by the shop.',
+    buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120],
+    registers: [this.registry],
+  });
+
+  /** Calls from the shop to the payments service: ok, error, open (refused by the circuit breaker). */
+  readonly paymentsCalls = new Counter({
+    name: 'payments_service_calls_total',
+    help: 'Calls from the shop to the payments service, by operation and result.',
+    labelNames: ['op', 'result'] as const,
+    registers: [this.registry],
+  });
+
+  readonly paymentsBreaker = new Gauge({
+    name: 'payments_circuit_breaker_state',
+    help: 'Circuit breaker for calls to the payments service: 0 closed, 0.5 half-open, 1 open.',
     registers: [this.registry],
   });
 

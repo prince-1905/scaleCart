@@ -2,7 +2,7 @@ import { BadRequestException, Inject, Injectable, Logger, ServiceUnavailableExce
 import { InjectDataSource } from '@nestjs/typeorm';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
-import { ENV, type Env } from '../config/env.js';
+import { ENV, type PaymentsEnv } from '../config/env.js';
 import { MetricsService } from '../observability/metrics.service.js';
 import { PaymentsService, type PaymentOutcome } from './payments.service.js';
 import { parseRazorpayEvent } from './razorpay-gateway.js';
@@ -28,10 +28,10 @@ export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
 
   constructor(
-    @InjectDataSource('payments') private readonly db: DataSource,
+    @InjectDataSource() private readonly db: DataSource,
     private readonly payments: PaymentsService,
     private readonly metrics: MetricsService,
-    @Inject(ENV) private readonly env: Env,
+    @Inject(ENV) private readonly env: PaymentsEnv,
   ) {}
 
   async handleRazorpay(

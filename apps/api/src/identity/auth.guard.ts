@@ -2,12 +2,15 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
+  Inject,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
+import { ENV, type Env } from '../config/env.js';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
-import { IS_PUBLIC, ROLES, type AuthUser, type Role } from '../common/auth.js';
+import { INTERNAL, IS_PUBLIC, ROLES, type AuthUser, type Role } from '../common/auth.js';
 import type { AccessTokenClaims } from './auth.service.js';
 
 /**
@@ -22,11 +25,21 @@ export class AuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
+    @Inject(ENV) private readonly env: Env,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     if (context.getType() !== 'http') return true;
     const targets = [context.getHandler(), context.getClass()];
+    if (this.reflector.getAllAndOverride<boolean>(INTERNAL, targets)) {
+      const expected = Buffer.from(this.env.internalServiceToken);
+      const given = Buffer.from(String(context.switchToHttp().getRequest().headers['x-service-token'] ?? ''));
+      // An empty configured token refuses everything: internal routes are never open by accident.
+      if (expected.length === 0 || given.length !== expected.length || !timingSafeEqual(given, expected)) {
+        throw new UnauthorizedException('internal route: missing or wrong service token');
+      }
+      return true;
+    }
     const req = context.switchToHttp().getRequest();
     if (this.reflector.getAllAndOverride<boolean>(IS_PUBLIC, targets)) {
       // Public routes still note who's calling when a valid token comes along: the rate limit

@@ -8,8 +8,10 @@ import { loggerModule } from '../observability/logger.js';
 import { ObservabilityModule } from '../observability/observability.module.js';
 import { OrdersCoreModule } from '../orders/orders-core.module.js';
 import { OutboxRelay } from '../orders/outbox-relay.js';
-import { PaymentJobs } from '../payments/payment-jobs.js';
-import { PaymentsCoreModule } from '../payments/payments-core.module.js';
+import { DropsDataModule } from '../drops/drop-purchases.js';
+import { OrderExpiry } from '../orders/order-expiry.js';
+import { PaymentCapturedConsumer } from '../orders/payment-captured.consumer.js';
+import { PaymentsClient } from '../orders/payments-client.js';
 import { CleanupService } from './cleanup.service.js';
 
 /**
@@ -32,7 +34,8 @@ class WorkerHealthController {
 }
 
 /**
- * The background process: outbox relay, notification consumer, cleanup and payment jobs.
+ * The background process: outbox relay, notification consumer, cleanup, the payment.captured consumer and order
+ * expiry (which asks the payments service before cancelling).
  * Same codebase and image as the API, different entry point (dist/worker.js), so it
  * scales separately: more API replicas for traffic, more workers for backlog.
  * It serves only /metrics and /health.
@@ -50,10 +53,18 @@ export class WorkerModule {
         OrdersCoreModule,
         InventoryCoreModule,
         NotificationsModule,
-        PaymentsCoreModule,
+        DropsDataModule,
       ],
       controllers: [WorkerHealthController],
-      providers: [{ provide: ENV, useValue: env }, OutboxRelay, CleanupService, PaymentJobs],
+      providers: [
+        { provide: ENV, useValue: env },
+        OutboxRelay,
+        CleanupService,
+        // Phase 8: payments is its own service; the shop settles orders from its events and owns the deadline.
+        PaymentCapturedConsumer,
+        PaymentsClient,
+        OrderExpiry,
+      ],
       exports: [ENV],
     };
   }

@@ -90,15 +90,18 @@ export interface Env {
   aiTimeoutMs: number;
   /** Chat messages per user per minute: each one costs model calls (and free-tier quota). */
   aiChatPerMinute: number;
-  /** Razorpay test/live API keys. Empty = payments off (the payment routes answer 503). */
-  razorpayKeyId: string;
-  razorpayKeySecret: string;
-  /** Signs Razorpay's webhooks (set in the Razorpay dashboard). Different from the key secret. */
-  razorpayWebhookSecret: string;
-  /** An unpaid order is cancelled and its stock released after this long. */
+  /** An unpaid order is cancelled and its stock released after this long (the shop owns this deadline). */
   paymentTimeoutSeconds: number;
-  /** How often the worker expires overdue orders and sends pending refunds. */
+  /** How often the worker expires overdue orders. */
   paymentJobsIntervalSeconds: number;
+  /**
+   * Phase 8: payments is its own service. The shared token for calls between the two (X-Service-Token);
+   * empty = /internal/* routes refuse everything.
+   */
+  internalServiceToken: string;
+  /** The payments service inside the network (never through NGINX), for the expiry job's "paid after all?" check. */
+  paymentsUrl: string;
+  paymentsTimeoutMs: number;
   /** A Redis "door counter" in front of each drop's MySQL stock row. Off = every buyer goes to MySQL (experiment E6). */
   dropStockGate: boolean;
   /** How often each API replica resets the drop counters from MySQL. */
@@ -240,11 +243,11 @@ export function loadEnv(
     aiThinkingLevel: aiThinkingLevel as AiThinkingLevel,
     aiTimeoutMs: positiveInt(source, 'AI_TIMEOUT_MS', 30_000),
     aiChatPerMinute: positiveInt(source, 'AI_CHAT_PER_MINUTE', 10),
-    razorpayKeyId: source.RAZORPAY_KEY_ID ?? '',
-    razorpayKeySecret: source.RAZORPAY_KEY_SECRET ?? '',
-    razorpayWebhookSecret: source.RAZORPAY_WEBHOOK_SECRET ?? '',
     paymentTimeoutSeconds: positiveInt(source, 'PAYMENT_TIMEOUT_SECONDS', 900),
     paymentJobsIntervalSeconds: positiveInt(source, 'PAYMENT_JOBS_INTERVAL_SECONDS', 30),
+    internalServiceToken: source.INTERNAL_SERVICE_TOKEN ?? '',
+    paymentsUrl: (source.PAYMENTS_URL ?? 'http://127.0.0.1:3002').replace(/\/$/, ''),
+    paymentsTimeoutMs: positiveInt(source, 'PAYMENTS_TIMEOUT_MS', 3_000),
     dropStockGate: bool(source.DROP_STOCK_GATE, true),
     dropStockGateResetSeconds: positiveInt(source, 'DROP_STOCK_GATE_RESET_SECONDS', 10),
     shutdownDrainSeconds: nonNegativeInt(source, 'SHUTDOWN_DRAIN_SECONDS', 5),

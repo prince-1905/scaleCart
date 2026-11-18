@@ -10,6 +10,7 @@ import { CheckoutService } from './checkout.service.js';
 import { OrdersCoreModule } from './orders-core.module.js';
 import { OrdersController } from './orders.controller.js';
 import { OrdersAdmin, OrdersAdminController } from './orders-admin.js';
+import { InternalOrdersController } from './internal-orders.controller.js';
 
 @Module({
   imports: [
@@ -23,7 +24,7 @@ import { OrdersAdmin, OrdersAdminController } from './orders-admin.js';
     UsersModule,
     MailerModule,
   ],
-  controllers: [OrdersController, OrdersAdminController],
+  controllers: [OrdersController, OrdersAdminController, InternalOrdersController],
   providers: [CheckoutService, OrdersAdmin],
 })
 export class OrdersModule {}

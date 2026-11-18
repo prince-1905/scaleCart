@@ -16,7 +16,6 @@ import { createApp, listen } from '../src/app.factory.js';
 import { RedisService } from '../src/cache/redis.service.js';
 import { RabbitService } from '../src/messaging/rabbit.service.js';
 import { WorkerModule } from '../src/worker/worker.module.js';
-import { PAYMENT_GATEWAY, type PaymentGateway } from '../src/payments/payment-gateway.js';
 import { loadEnv, type HttpAdapterName } from '../src/config/env.js';
 import type { ModuleName } from '../src/database/database.js';
 
@@ -55,6 +54,8 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   // Every test request comes from 127.0.0.1: one shared bucket would throttle the whole suite.
   // rate-limit.e2e-spec.ts turns it on with small buckets.
   RATE_LIMIT_ENABLED: 'false',
+  // Phase 8: the shared token for /internal/* calls between the shop and the payments service (tests only).
+  INTERNAL_SERVICE_TOKEN: 'test-internal-service-token-0123456789abcdef',
 };
 
 export async function startApp(
@@ -84,36 +85,6 @@ export async function startAppWithLlm(
     .useValue(llm)
     .compile();
   const app = moduleRef.createNestApplication(new FastifyAdapter(), { logger: false, rawBody: true });
-  await listen(app, { ...env, port: 0 }, '127.0.0.1');
-  await waitForRedis(app);
-  return app;
-}
-
-/** Test-only Razorpay secrets: webhooks and checkout signatures in tests are signed with these. */
-export const TEST_PAYMENT_ENV = {
-  RAZORPAY_KEY_ID: 'rzp_test_e2e',
-  RAZORPAY_KEY_SECRET: 'test-key-secret-0123456789',
-  RAZORPAY_WEBHOOK_SECRET: 'test-webhook-secret-0123456789',
-};
-
-/**
- * The API with the payment provider replaced by `gateway` (a fake Razorpay). Webhooks
- * still go through real HTTP, raw-body signature checks, MySQL and the order state machine.
- */
-export async function startAppWithGateway(
-  gateway: PaymentGateway,
-  adapter: HttpAdapterName = 'fastify',
-  overrides: NodeJS.ProcessEnv = {},
-): Promise<INestApplication> {
-  const env = loadEnv({ ...TEST_ENV, ...TEST_PAYMENT_ENV, HTTP_ADAPTER: adapter, ...overrides });
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule.forRoot(env)] })
-    .overrideProvider(PAYMENT_GATEWAY)
-    .useValue(gateway)
-    .compile();
-  const app =
-    adapter === 'fastify'
-      ? moduleRef.createNestApplication(new FastifyAdapter(), { logger: false, rawBody: true })
-      : moduleRef.createNestApplication({ logger: false, rawBody: true });
   await listen(app, { ...env, port: 0 }, '127.0.0.1');
   await waitForRedis(app);
   return app;

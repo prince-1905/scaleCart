@@ -19,6 +19,13 @@ export const Public = () => SetMetadata(IS_PUBLIC, true);
 
 export const Roles = (...roles: Role[]) => SetMetadata(ROLES, roles);
 
+export const INTERNAL = 'auth:internal';
+/**
+ * Service-to-service only (Phase 8): needs the X-Service-Token header, never a customer's token.
+ * NGINX doesn't route /internal/*, so these are reachable only inside the network.
+ */
+export const Internal = () => SetMetadata(INTERNAL, true);
+
 export const CurrentUser = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext): AuthUser => ctx.switchToHttp().getRequest().user,
 );

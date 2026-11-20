@@ -8,6 +8,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { Gauge } from 'prom-client';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DataSource } from 'typeorm';
+import { withTraceparent } from '../common/trace-context.js';
 import { RabbitService } from '../messaging/rabbit.service.js';
 import { MetricsService } from '../observability/metrics.service.js';
 
@@ -19,6 +20,7 @@ interface OutboxRow {
   id: string;
   eventType: string;
   payload: unknown;
+  traceParent: string | null;
   createdAt: Date;
 }
 
@@ -74,7 +76,7 @@ export class OutboxRelay implements OnApplicationBootstrap, OnApplicationShutdow
     if (!this.rabbit.isReady) return 0;
     return this.db.transaction(async (m) => {
       const rows: OutboxRow[] = await m.query(
-        `SELECT id, event_type AS eventType, payload, created_at AS createdAt
+        `SELECT id, event_type AS eventType, payload, trace_parent AS traceParent, created_at AS createdAt
            FROM outbox WHERE published_at IS NULL
           ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED`,
         [BATCH],
@@ -82,11 +84,15 @@ export class OutboxRelay implements OnApplicationBootstrap, OnApplicationShutdow
       if (rows.length === 0) return 0;
 
       for (const row of rows) {
-        this.rabbit.publishEvent(row.eventType, row.payload, {
-          messageId: row.id,
-          type: row.eventType,
-          timestamp: Math.floor(new Date(row.createdAt).getTime() / 1000),
-        });
+        // Inside the trace of the request that wrote the event: the RabbitMQ instrumentation adds it to the message
+        // headers, and the consumer continues the same trace (no-op when tracing is off).
+        withTraceparent(row.traceParent, () =>
+          this.rabbit.publishEvent(row.eventType, row.payload, {
+            messageId: row.id,
+            type: row.eventType,
+            timestamp: Math.floor(new Date(row.createdAt).getTime() / 1000),
+          }),
+        );
       }
       await this.rabbit.confirm();
 

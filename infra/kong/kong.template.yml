@@ -117,6 +117,17 @@ plugins:
       header_name: X-Request-ID
       generator: uuid
       echo_downstream: true
+  # Phase 10: distributed tracing. Kong starts the trace (or continues one a client sent), records its own span, and
+  # passes the W3C traceparent header on to the shop / payments. The response carries X-Trace-Id, so a customer's
+  # "it was slow" report can be looked up in Jaeger (http://localhost:16686) directly.
+  - name: opentelemetry
+    config:
+      traces_endpoint: http://jaeger:4318/v1/traces
+      resource_attributes:
+        service.name: kong
+      http_response_header_for_traceid: X-Trace-Id
+      propagation:
+        default_format: w3c
   # Per-route counts and latency, split into Kong's own time and the service's time.
   - name: prometheus
     config:

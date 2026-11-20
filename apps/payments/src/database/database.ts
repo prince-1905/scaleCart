@@ -3,6 +3,7 @@ import type { DataSourceOptions } from 'typeorm';
 import type { DbConfig } from '../config/env.js';
 import { PaymentsInit1793318400000 } from '../payments/migrations/1793318400000-payments-init.js';
 import { PaymentsEvents1794900000000 } from '../payments/migrations/1794900000000-payments-events.js';
+import { PaymentsOutboxTrace1795100000000 } from '../payments/migrations/1795100000000-outbox-trace.js';
 import { Payment, PaymentAttempt, WebhookEvent } from '../payments/payment.entities.js';
 
 export function mysqlOptions(db: DbConfig, poolSize: number = db.poolSize): DataSourceOptions {
@@ -15,7 +16,7 @@ export function mysqlOptions(db: DbConfig, poolSize: number = db.poolSize): Data
     database: db.database,
     entities: [PaymentAttempt, Payment, WebhookEvent],
     // Same migrations table as when payments lived in the shop: the first migration is already applied there.
-    migrations: [PaymentsInit1793318400000, PaymentsEvents1794900000000],
+    migrations: [PaymentsInit1793318400000, PaymentsEvents1794900000000, PaymentsOutboxTrace1795100000000],
     migrationsTableName: 'migrations',
     migrationsTransactionMode: 'each',
     synchronize: false,

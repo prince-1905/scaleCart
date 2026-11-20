@@ -24,6 +24,7 @@ import type { CheckoutDto } from './checkout.dto.js';
 import { ORDER_CREATED, type OrderCreatedEvent } from './events.js';
 import { IdempotencyKey } from './idempotency-key.entity.js';
 import { Order, OrderItem, type OrderStatus } from './order.entity.js';
+import { currentTraceparent } from '../common/trace-context.js';
 import { OutboxEvent } from './outbox.entity.js';
 
 export interface OrderView {
@@ -234,6 +235,7 @@ export class CheckoutService {
             eventType: ORDER_CREATED,
             aggregateId: orderId,
             payload: event,
+            traceParent: currentTraceparent(),
           });
         }
         const done = await m.update(

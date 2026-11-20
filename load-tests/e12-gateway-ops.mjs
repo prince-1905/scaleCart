@@ -4,6 +4,8 @@
  *   node load-tests/e12-gateway-ops.mjs down      stop the gateway for 30 s, then start it
  *   node load-tests/e12-gateway-ops.mjs restart   `docker compose restart gateway` (a planned restart)
  *   node load-tests/e12-gateway-ops.mjs reload    change Kong's config twice through its admin API (DB-less /config)
+ *   node load-tests/e12-gateway-ops.mjs jaeger    E13d: stop the tracing backend (Jaeger) for 60 s, then start it; also
+ *                                                 records the memory of the traced services before, during and after
  *
  * Traffic: RATE product-page requests per second (default 100) through NGINX → Kong → shop, plus one request per
  * second for the shop's start page (/shop/, served by NGINX itself). Every answer is recorded; the script prints what
@@ -18,8 +20,8 @@ const ROOT = resolve(import.meta.dirname, '..');
 const BASE = 'http://localhost:8088';
 const RATE = Number(process.env.RATE ?? 100);
 const mode = process.argv[2];
-if (!['down', 'restart', 'reload'].includes(mode)) {
-  console.error('usage: node load-tests/e12-gateway-ops.mjs <down|restart|reload>');
+if (!['down', 'restart', 'reload', 'jaeger'].includes(mode)) {
+  console.error('usage: node load-tests/e12-gateway-ops.mjs <down|restart|reload|jaeger>');
   process.exit(2);
 }
 
@@ -132,6 +134,24 @@ if (mode === 'down') {
   const first = answers.find((a) => a.phase === 'gateway starting' && a.what === 'api' && a.status === 200);
   log(`first product page served again: request sent ${(first.sent - (u - t0) / 1000).toFixed(2)} s after the start command`);
   await sleep(10_000);
+  mark('after');
+} else if (mode === 'jaeger') {
+  const memory = () =>
+    sh('docker stats --no-stream --format "{{.Name}}={{.MemUsage}}" scalecart-api-4 scalecart-payments-1 scalecart-gateway-1')
+      .split(/\r?\n/)
+      .map((l) => l.replace('scalecart-', '').replace(/ \/ .*/, ''))
+      .join('  ');
+  log('memory before:', memory());
+  mark('jaeger stopped');
+  sh('docker compose stop jaeger');
+  await sleep(30_000);
+  log('memory after 30 s without Jaeger:', memory());
+  await sleep(30_000);
+  log('memory after 60 s without Jaeger:', memory());
+  mark('jaeger back');
+  sh('docker compose start jaeger');
+  await sleep(20_000);
+  log('memory 20 s after Jaeger is back:', memory());
   mark('after');
 } else if (mode === 'restart') {
   mark('restarting');

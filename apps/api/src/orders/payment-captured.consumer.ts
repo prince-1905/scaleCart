@@ -1,3 +1,4 @@
+import { currentTraceparent } from '../common/trace-context.js';
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { ConsumeMessage } from 'amqplib';
@@ -87,9 +88,15 @@ export class PaymentCapturedConsumer implements OnApplicationBootstrap {
       const outcome: OrderPaymentResult = marked === 'not_found' ? 'cancelled' : marked;
       const replyEvent: OrderPaymentResultEvent = { orderId: event.orderId, paymentId: event.paymentId, result: outcome };
       await m.query(
-        `INSERT INTO outbox (id, event_type, aggregate_id, payload) VALUES (?, ?, ?, ?)
+        `INSERT INTO outbox (id, event_type, aggregate_id, payload, trace_parent) VALUES (?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE id = id`,
-        [stableId(`order.payment_result:${event.paymentId}`), PAYMENT_EVENTS.orderPaymentResult, event.orderId, JSON.stringify(replyEvent)],
+        [
+          stableId(`order.payment_result:${event.paymentId}`),
+          PAYMENT_EVENTS.orderPaymentResult,
+          event.orderId,
+          JSON.stringify(replyEvent),
+          currentTraceparent(), // the consumer's span: the reply continues the payment's trace
+        ],
       );
       return outcome;
     });

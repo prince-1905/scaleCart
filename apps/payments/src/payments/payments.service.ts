@@ -1,3 +1,4 @@
+import { currentTraceparent } from '../common/trace-context.js';
 import {
   BadGatewayException,
   BadRequestException,
@@ -206,11 +207,12 @@ export class PaymentsService {
         return this.refundLater(m, p.id, 'amount_mismatch');
       }
       const event: PaymentCapturedEvent = { orderId: attempt.orderId, paymentId: p.id, amountPaise: p.amountPaise };
-      await m.query('INSERT INTO outbox (id, event_type, aggregate_id, payload) VALUES (?, ?, ?, ?)', [
+      await m.query('INSERT INTO outbox (id, event_type, aggregate_id, payload, trace_parent) VALUES (?, ?, ?, ?, ?)', [
         uuidv7(),
         EVENTS.paymentCaptured,
         attempt.orderId,
         JSON.stringify(event),
+        currentTraceparent(), // the webhook's (or confirm's) trace continues in the shop
       ]);
       return 'captured';
     }));

@@ -117,11 +117,16 @@ services:
   worker:
     build: ./apps/api
     image: scalecart/api:dev
-    command: ["node", "dist/worker.js"]
+    command: ["node", "--import", "./dist/tracing.js", "dist/worker.js"]
     environment:
       <<: *db-env
       PORT: 3001
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Phase 10: traces to Jaeger (UI http://localhost:16686). TRACING_ENABLED=false turns it off completely.
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1}
+      OTEL_SERVICE_NAME: shop-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       HTTP_ACCESS_LOG: "false"
       RABBITMQ_URL: amqp://scalecart:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672
       SMTP_HOST: mailpit
@@ -178,6 +183,11 @@ services:
       PORT: 3000
       HTTP_ADAPTER: ${HTTP_ADAPTER:-fastify}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Phase 10: traces to Jaeger (UI http://localhost:16686). TRACING_ENABLED=false turns it off completely.
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1}
+      OTEL_SERVICE_NAME: shop-api
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       # Off by default: per-request logs measurably reduce throughput under load.
       HTTP_ACCESS_LOG: ${HTTP_ACCESS_LOG:-false}
       LAB_ENDPOINTS: "true"
@@ -259,6 +269,11 @@ services:
       PORT: 3002
       DB_POOL_SIZE: ${PAYMENTS_DB_POOL_SIZE:-5}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Phase 10: traces to Jaeger (UI http://localhost:16686). TRACING_ENABLED=false turns it off completely.
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1}
+      OTEL_SERVICE_NAME: payments
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       HTTP_ACCESS_LOG: ${HTTP_ACCESS_LOG:-false}
       # Verifies the shop's login tokens (verify only, same secret).
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
@@ -346,6 +361,9 @@ services:
       # Response headers Kong adds: only its latency split (X-Kong-Proxy-Latency / X-Kong-Upstream-Latency), no
       # "Via: kong/<version>" advertising the version.
       KONG_HEADERS: latency_tokens
+      # Phase 10: Kong starts each trace (its opentelemetry plugin, see kong.template.yml) and passes it on (traceparent).
+      KONG_TRACING_INSTRUMENTATIONS: request,balancer
+      KONG_TRACING_SAMPLING_RATE: ${TRACING_SAMPLE_RATIO:-1}
       KONG_PROXY_ACCESS_LOG: "off"
       KONG_ADMIN_ACCESS_LOG: "off"
       KONG_PROXY_ERROR_LOG: /dev/stderr
@@ -369,6 +387,22 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+
+  # Phase 10: trace storage + UI (all-in-one, in memory: traces are gone after a restart). UI: http://localhost:16686
+  # Services send traces with OTLP over HTTP to jaeger:4318 (Docker network only).
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0
+    # Our config: the built-in default, but at most 20,000 traces in memory (see infra/jaeger/config.yaml).
+    command: ["--config=file:/etc/jaeger/config.yaml"]
+    volumes:
+      - ./infra/jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+    ports:
+      - "16686:16686"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
 
   prometheus:
     image: prom/prometheus:v3.15.1

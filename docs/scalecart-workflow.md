@@ -566,6 +566,23 @@ Pay fails in 2.1 s × 5, then ~3 ms (breaker).
 without. Gateway stopped: no API at all (the shop's pages still load); restart ~4 s of errors; live config change via
 the admin API: 0 errors.
 
+### S. Following one request everywhere: tracing (Phase 10)
+
+```
+ Kong        starts the trace (or continues one), adds X-Trace-Id to the response, passes "traceparent" on
+ payments    span per request; calls to the shop carry traceparent → the shop's spans join the same trace
+ every app   automatic spans for HTTP in/out, MySQL, Redis, RabbitMQ (OpenTelemetry), sent to Jaeger in batches
+ outbox      the event's row stores the request's traceparent → the relay publishes INSIDE that trace →
+             RabbitMQ message headers → the consumer continues it (and its reply event does the same)
+ sampler     a NEW trace only starts at a request or a message: the relay's polling and jobs are never traced
+ Jaeger      http://localhost:16686 — search by service, or paste an X-Trace-Id
+```
+
+**Analogy:** a parcel tracking page: every depot it passed, with times, under one tracking number.
+**Measured (E13):** Pay p50 321 ms, of which Razorpay's API 265 ms (79%) and the shop lookup 2.6 ms. A planted 3 s
+lock found from one trace (3 of 3). 59 of 60 payment traces complete across RabbitMQ. Cost at 300 req/s: shop CPU ≈39%
+→ ≈53% (every request) / ≈49% (10% sampled). Jaeger down: 0 failed requests.
+
 ---
 
 ## 6. How we watch it (observability)
@@ -595,7 +612,9 @@ the admin API: 0 errors.
 | Browser end-to-end tests | The storefront has component tests with a fake API, no automated browser tests | Playwright |
 | HttpOnly refresh cookie | The storefront keeps tokens in localStorage (demo trade-off) | small API change |
 | 2FA extras | Sessions from before 2FA was turned on stay valid; no email alert on enable/disable/lockout; not mandatory for admins; no passkeys | later |
-| More services, tracing | Only payments is split out (§Q); request IDs cross services (§R), a full trace needs tracing | next phases |
+| More services | Only payments is split out (§Q) | later |
+| Cheaper tracing | Every instrumentation in the auto package is on; tracing costs ~10 points of shop CPU at 300 req/s even at 10% sampling, ~14 when every request is traced (E13a) | next small step |
+| Durable traces | Jaeger keeps 20,000 traces in memory; a restart loses them | with a real deployment |
 | Two gateways | One Kong: down = no API, restart = ~4 s of errors (E12c/d) | later |
 ---
 

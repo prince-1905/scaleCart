@@ -60,10 +60,11 @@ export class PaymentsService {
     @Inject(ENV) private readonly env: PaymentsEnv,
   ) {}
 
-  /** "Pay" was clicked: create (or reuse) a provider order for this order. */
-  async startPayment(userId: string, orderId: string): Promise<PaymentSession> {
+  /** "Pay" was clicked: create (or reuse) a provider order for this order. `requestId`: the gateway's X-Request-ID,
+   *  passed on to the shop so both services log the same id. */
+  async startPayment(userId: string, orderId: string, requestId?: string): Promise<PaymentSession> {
     const gateway = this.requireGateway();
-    const order = await this.shop.getOrder(orderId);
+    const order = await this.shop.getOrder(orderId, requestId);
     if (!order || order.userId !== userId) throw new NotFoundException('order not found');
     if (order.status !== 'pending_payment') {
       throw new ConflictException({ statusCode: 409, error: `order_${order.status}`, message: `order is ${order.status}` });

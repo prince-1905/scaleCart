@@ -48,10 +48,10 @@ export class ShopClient {
   }
 
   /** The order, or null if the shop says it doesn't exist. Throws 503 when the shop can't answer. */
-  async getOrder(orderId: string): Promise<ShopOrder | null> {
+  async getOrder(orderId: string, requestId?: string): Promise<ShopOrder | null> {
     const op = 'get_order';
     try {
-      const order = await this.breaker.run(() => this.withRetry(op, () => this.fetchOrder(orderId)));
+      const order = await this.breaker.run(() => this.withRetry(op, () => this.fetchOrder(orderId, requestId)));
       this.metrics.shopCalls.inc({ op, result: order ? 'ok' : 'not_found' });
       return order;
     } catch (err) {
@@ -76,11 +76,12 @@ export class ShopClient {
     }
   }
 
-  private async fetchOrder(orderId: string): Promise<ShopOrder | null> {
+  private async fetchOrder(orderId: string, requestId?: string): Promise<ShopOrder | null> {
     const stop = this.metrics.shopCallDuration.startTimer({ op: 'get_order' });
     try {
       const res = await fetch(`${this.env.shopUrl}/internal/orders/${encodeURIComponent(orderId)}`, {
-        headers: { 'x-service-token': this.env.serviceToken },
+        // The same request id as the customer's request: one id finds the log lines in both services.
+        headers: { 'x-service-token': this.env.serviceToken, ...(requestId && { 'x-request-id': requestId }) },
         signal: AbortSignal.timeout(this.env.shopTimeoutMs),
       });
       if (res.status === 404) return null;

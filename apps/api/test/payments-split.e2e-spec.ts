@@ -118,7 +118,9 @@ describe('payments split: the shop side', () => {
       await publishCaptured(orderId, 'pay_split_1');
       await eventually(async () => (await orderStatus(orderId)).status === 'paid');
       expect((await orderStatus(orderId)).paymentId).toBe('pay_split_1');
-      expect(await reservation(orderId)).toBe('committed');
+      // Stock is committed right AFTER the "paid" transaction, so it can lag the status by a moment (this flaked once
+      // in a busy full run, 2026-11-18).
+      await eventually(async () => (await reservation(orderId)) === 'committed');
       expect(await replies(orderId)).toEqual([{ orderId, paymentId: 'pay_split_1', result: 'paid' }]);
     });
 

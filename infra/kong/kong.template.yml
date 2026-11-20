@@ -1,0 +1,126 @@
+# Kong API gateway (Phase 9), DB-less: this file is Kong's whole configuration.
+# At container start, __JWT_SECRET__ is replaced with JWT_SECRET from .env (see docker-compose.yml), so the secret is
+# never written into the repository.
+#
+# Layers:  NGINX (edge: static shop files, flood limit per token, client IP)
+#            → Kong (gateway: token check at the door, routing, request ids, metrics)
+#              → shop (api:3000) / payments (payments:3002), which still check tokens themselves (defense in depth).
+#
+# Route matching: Kong picks the most specific route. Routes with methods beat routes without; then the longer path
+# wins; regex paths ("~…") are tried by regex_priority. Anything not matched by a public route falls through to
+# "shop-protected" ("/"), which needs a valid token.
+_format_version: "3.0"
+
+services:
+  - name: shop
+    url: http://api:3000
+    connect_timeout: 2000
+    read_timeout: 30000
+    write_timeout: 30000
+    retries: 0                       # never replay a checkout behind the caller's back
+    routes:
+      # Browse, search, product pages, drop pages: anyone, no token needed. (GET /drops/:id/stats is admin-only; it
+      # passes here without a gateway check and the shop refuses non-admins itself.)
+      - name: shop-public-read
+        methods: [GET, HEAD]
+        paths: [/products, /inventory, /drops, /health, /docs]
+        strip_path: false
+      # Logging in and out. "/auth/login" also covers "/auth/login/2fa".
+      - name: shop-public-auth
+        methods: [POST]
+        paths: [/auth/register, /auth/login, /auth/refresh, /auth/logout]
+        strip_path: false
+      # Read-only MCP tools for AI clients, and the lab routes used by experiments (as before the gateway).
+      - name: shop-public-other
+        paths: [/mcp, /lab]
+        strip_path: false
+      # Everything else on the shop needs a valid token: cart, checkout, my orders, /auth/me, 2FA settings, admin
+      # (admin also needs the admin role, which only the shop can check).
+      - name: shop-protected
+        paths: [/]
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              claims_to_verify: [exp]   # refuse expired tokens (not checked by default)
+              uri_param_names: []        # only the Authorization header, never ?jwt= in URLs
+              cookie_names: []
+      # Never reachable from outside, whatever the token: service-to-service routes, and metrics (Prometheus scrapes
+      # each service directly on the Docker network).
+      - name: blocked
+        paths: [/internal, /metrics]
+        strip_path: false
+        plugins:
+          - name: request-termination
+            config:
+              status_code: 404
+              message: not found
+
+  # AI chat: one message can take several model calls (up to ~75 s) and the reply is streamed, so this service has a
+  # longer read timeout and the route doesn't buffer the response.
+  - name: shop-ai
+    url: http://api:3000
+    connect_timeout: 2000
+    read_timeout: 90000
+    retries: 0
+    routes:
+      - name: shop-ai
+        paths: [/ai]
+        strip_path: false
+        response_buffering: false
+        plugins:
+          - name: jwt
+            config:
+              claims_to_verify: [exp]   # refuse expired tokens (not checked by default)
+              uri_param_names: []        # only the Authorization header, never ?jwt= in URLs
+              cookie_names: []
+
+  # Phase 8's payments service. If it is down, only these routes fail (Kong answers 502/503), the shop is untouched.
+  - name: payments
+    url: http://payments:3002
+    connect_timeout: 2000
+    read_timeout: 30000
+    retries: 0
+    routes:
+      - name: payments-protected
+        paths: ['~/orders/[^/]+/payment$', /payments/razorpay/confirm]
+        regex_priority: 10
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              claims_to_verify: [exp]   # refuse expired tokens (not checked by default)
+              uri_param_names: []        # only the Authorization header, never ?jwt= in URLs
+              cookie_names: []
+      # Razorpay's webhook and the browser's return from Razorpay Checkout carry no token: they are checked by
+      # signature (HMAC) inside the payments service.
+      - name: payments-public
+        methods: [POST]
+        paths: [/payments/razorpay/webhook, /payments/razorpay/callback]
+        strip_path: false
+
+# The one "consumer" is the shop's login system: every access token it issues has iss = "scalecart" and is signed
+# with the shared HS256 secret. Kong checks the signature and the expiry; the services check the rest (audience,
+# role, the 2FA challenge token's own audience).
+consumers:
+  - username: scalecart-users
+    jwt_secrets:
+      - key: scalecart
+        algorithm: HS256
+        secret: '__JWT_SECRET__'
+
+plugins:
+  # One id per request: sent to the services (they log it) and echoed to the client, so a support ticket with
+  # "X-Request-ID: …" finds every log line of that request, across services.
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+  # Per-route counts and latency, split into Kong's own time and the service's time.
+  - name: prometheus
+    config:
+      status_code_metrics: true
+      latency_metrics: true
+      upstream_health_metrics: true
+      bandwidth_metrics: false

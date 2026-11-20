@@ -16,6 +16,10 @@ export class OutboxEvent {
   @Column({ type: 'json' })
   payload: unknown;
 
+  /** W3C traceparent of the request that wrote it (Phase 10), so the relay publishes it inside that trace. */
+  @Column({ name: 'trace_parent', type: 'varchar', length: 55, nullable: true })
+  traceParent?: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'datetime', precision: 3 })
   createdAt: Date;
 

@@ -5,6 +5,7 @@ import {
   NestInterceptor,
 } from '@nestjs/common';
 import { HttpAdapterHost } from '@nestjs/core';
+import { trace } from '@opentelemetry/api';
 import type { ServerResponse } from 'node:http';
 import { hostname } from 'node:os';
 import { Observable } from 'rxjs';
@@ -44,6 +45,13 @@ export class HttpMetricsInterceptor implements NestInterceptor {
     const route = routeOf(req);
 
     this.adapterHost.httpAdapter.setHeader(res, 'x-instance', INSTANCE);
+    // Tracing (Phase 10): the HTTP layer only knows "GET"; name the request's span after the route, so Jaeger shows
+    // "GET /products/:id". No-op when tracing is off.
+    const span = trace.getActiveSpan();
+    if (span && route !== 'unmatched') {
+      span.updateName(`${req.method} ${route}`);
+      span.setAttribute('http.route', route);
+    }
     if (UNMEASURED.has(route)) return next.handle();
 
     const raw: ServerResponse = res.raw ?? res;

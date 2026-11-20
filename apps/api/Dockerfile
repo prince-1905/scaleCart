@@ -19,4 +19,5 @@ COPY --from=build --chown=node:node /app/dist ./dist
 USER node
 EXPOSE 3000
 # Exec form so Node is PID 1 and receives SIGTERM directly (needed for graceful shutdown).
-CMD ["node", "dist/main.js"]
+# --import loads tracing first (Phase 10); it does nothing unless TRACING_ENABLED=true.
+CMD ["node", "--import", "./dist/tracing.js", "dist/main.js"]

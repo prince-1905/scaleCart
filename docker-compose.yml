@@ -302,13 +302,73 @@ services:
       # The storefront's build output: run `npm run build` in apps/web first (see apps/web/README.md).
       - ./apps/web/dist:/usr/share/nginx/shop:ro
     depends_on:
-      api:
+      gateway:
         condition: service_healthy
     deploy:
       resources:
         limits:
           cpus: "2.0"
           memory: 256M
+
+  # LAB ONLY (E12): the same edge, straight to the shop without the gateway, on port 8090.
+  #   docker compose --profile lab up -d lb-direct
+  lb-direct:
+    image: nginx:1.30.6-alpine
+    profiles: [lab]
+    ports:
+      - "8090:80"
+    volumes:
+      - ./infra/nginx/nginx.direct.conf:/etc/nginx/nginx.conf:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 256M
+
+  # Phase 9: API gateway (Kong, DB-less). NGINX sends every API request here; Kong checks tokens, routes to the shop or
+  # payments, adds X-Request-ID and exposes its own metrics. Config: infra/kong/kong.template.yml.
+  gateway:
+    image: kong:3.9.4
+    entrypoint: ["/bin/sh", "/kong/start.sh"]
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
+      KONG_PROXY_LISTEN: 0.0.0.0:8000 reuseport backlog=16384
+      # Admin API only inside the container (docker exec), for config reloads in experiments.
+      KONG_ADMIN_LISTEN: 127.0.0.1:8001
+      # Metrics + health for Prometheus, on the Docker network only.
+      KONG_STATUS_LISTEN: 0.0.0.0:8100
+      KONG_NGINX_WORKER_PROCESSES: "2"
+      # NGINX in front sets X-Real-IP to the caller's address; trust it (Kong is only reachable from inside Docker).
+      KONG_TRUSTED_IPS: 0.0.0.0/0,::/0
+      KONG_REAL_IP_HEADER: X-Real-IP
+      # Response headers Kong adds: only its latency split (X-Kong-Proxy-Latency / X-Kong-Upstream-Latency), no
+      # "Via: kong/<version>" advertising the version.
+      KONG_HEADERS: latency_tokens
+      KONG_PROXY_ACCESS_LOG: "off"
+      KONG_ADMIN_ACCESS_LOG: "off"
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      # Re-ask Docker's DNS often, so a restarted shop or payments container (new IP) is found within seconds.
+      KONG_DNS_STALE_TTL: "4"
+      KONG_DNS_NOT_FOUND_TTL: "1"
+      KONG_DNS_ORDER: LAST,A,CNAME
+    volumes:
+      - ./infra/kong:/kong:ro
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
 
   prometheus:
     image: prom/prometheus:v3.15.1

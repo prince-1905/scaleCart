@@ -43,9 +43,13 @@ export class PaymentsController {
 
   @Post('orders/:id/payment')
   @HttpCode(201)
-  start(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+  start(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Headers('x-request-id') requestId: string | undefined,
+  ) {
     if (!UUID_PATTERN.test(id)) throw new NotFoundException('order not found');
-    return this.payments.startPayment(user.id, id);
+    return this.payments.startPayment(user.id, id, requestId);
   }
 
   @Post('payments/razorpay/confirm')

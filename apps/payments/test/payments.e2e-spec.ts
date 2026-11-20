@@ -79,6 +79,18 @@ describe('payments service', () => {
     });
   });
 
+  it("Pay passes the gateway's X-Request-ID on to the shop, so both services log the same id", async () => {
+    const customer = customerToken();
+    const order = shop.order(customer.userId);
+    const before = shop.requestIds.length;
+    await http(app)
+      .post(`/orders/${order.id}/payment`)
+      .auth(customer.token, { type: 'bearer' })
+      .set('x-request-id', 'req-e2e-123')
+      .expect(201);
+    expect(shop.requestIds.slice(before)).toEqual(['req-e2e-123']);
+  });
+
   it('rejects a forged or altered webhook and records nothing', async () => {
     const { order, session } = await startedPayment();
     const payment = fake.pay(session.providerOrderId);

@@ -547,6 +547,25 @@ mailbox for everything else, so nothing is lost if one shop is closed for a minu
 60/60 webhooks accepted, orders paid 4–5 s after restart. Payments down: browsing and checkout unchanged. Frozen shop:
 Pay fails in 2.1 s × 5, then ~3 ms (breaker).
 
+### R. The front door: NGINX, then the API gateway (Phase 9)
+
+```
+ Browser ──► NGINX :8088  /shop/* → files (still works if everything behind it is down)
+                          API     → flood limit per token (50/s) → Kong
+             Kong         public routes (browse, drops, login, register, refresh, webhooks)  → no token needed
+                          /orders/:id/payment, /payments/razorpay/confirm                       → payments, token needed
+                          /internal/*, /metrics                                                 → 404
+                          everything else                                                       → shop, token needed
+                          token check = HS256 signature + issuer "scalecart" + not expired → else 401 right here
+                          every request gets X-Request-ID (sent to the services, logged, echoed back)
+             shop / payments: still verify the token (audience, role): the gateway is the first wall, not the only one
+```
+
+**Analogy:** hotel reception. Fake ID cards are turned away at the desk, so the rooms never see them.
+**Measured (E12):** +0.1–1.2 ms per request. A flood of 1,000 forged tokens/s: shop CPU 15–16% with Kong vs 50–52%
+without. Gateway stopped: no API at all (the shop's pages still load); restart ~4 s of errors; live config change via
+the admin API: 0 errors.
+
 ---
 
 ## 6. How we watch it (observability)
@@ -576,7 +595,8 @@ Pay fails in 2.1 s × 5, then ~3 ms (breaker).
 | Browser end-to-end tests | The storefront has component tests with a fake API, no automated browser tests | Playwright |
 | HttpOnly refresh cookie | The storefront keeps tokens in localStorage (demo trade-off) | small API change |
 | 2FA extras | Sessions from before 2FA was turned on stay valid; no email alert on enable/disable/lockout; not mandatory for admins; no passkeys | later |
-| More services, tracing | Only payments is split out (§Q); one trace across services needs tracing | next phases |
+| More services, tracing | Only payments is split out (§Q); request IDs cross services (§R), a full trace needs tracing | next phases |
+| Two gateways | One Kong: down = no API, restart = ~4 s of errors (E12c/d) | later |
 ---
 
 ## 8. How to tell it in an interview (2 minutes)

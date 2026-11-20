@@ -28,6 +28,11 @@ scrape_configs:
         port: 3002
         refresh_interval: 5s
 
+  # Phase 9: the API gateway (Kong's status listener). Per-route requests, Kong's own latency vs the service's.
+  - job_name: gateway
+    static_configs:
+      - targets: [gateway:8100]
+
   # RabbitMQ's built-in Prometheus plugin: queue depths, message rates.
   - job_name: rabbitmq
     # Per-queue numbers (the default endpoint sums all queues together).

@@ -30,6 +30,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | One scraper (1,500 searches/s) failed 1,033–2,161 of 3,000 shopper requests | Token bucket per user in Redis (Lua) + NGINX edge limit per token + a backup bucket in each pod | Shoppers' p95 **7.0–7.2 ms under attack** (9.8 ms with no attacker), 0 errors in 3 of 4 runs. App limiter alone wasn't enough: Node was 100% busy refusing, and fail open leaked 18,373 requests | [E9](docs/experiments/E9-rate-limiting.md) |
 | A stolen password is enough to log in | Two-step login with an authenticator app (TOTP, RFC 6238), atomic attempt counter in MySQL, replay protection, encrypted secrets | 30 code guesses at once → **exactly 5 checked** (naive version: 30 of 30); server clock within 0.2 s of a ±30 s tolerance | [E10](docs/experiments/E10-two-factor.md) |
 | Payments shared one process with the shop: a shop crash also refused Razorpay's webhooks | Payments split into its own service: one sync call (timeout, retry, circuit breaker), everything else as events with an outbox on both sides | Shop down 60 s: **60/60 webhooks accepted**, all orders paid 4–5 s after restart. Payments down: browsing and checkout unchanged. Cost: ~1 ms per hop (p99 8–26 ms), order paid ~0.1 s after the webhook | [E11](docs/experiments/E11-payments-service.md) |
+| Every fake login token cost the shop CPU: a flood of 1,000/s, each token different, slips past per-token limits | Kong API gateway in front of the services: token check at the door, routing, request IDs | Shop CPU under the flood **15–16% vs 50–52%** (no attack: 14–17%), shoppers' p95 **9–16 ms vs 23–36 ms**. Cost: ~1 ms per request. Found: NGINX's default health check kept customers out **13 s** after Kong was back (fixed: ~0.2 s) | [E12](docs/experiments/E12-api-gateway.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -44,11 +45,12 @@ Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU 
 
 ```mermaid
 flowchart LR
-    B[Browser<br/>React shop /shop/] --> LB[NGINX<br/>load balancer]
+    B[Browser<br/>React shop /shop/] --> LB[NGINX<br/>edge: shop files · flood limit]
     RZ[Razorpay] -- webhooks --> LB
-    LB --> API1[API]
-    LB --> API2[API ...]
-    LB -- Pay · webhooks --> PAY[Payments service]
+    LB --> GW[Kong API gateway<br/>token check · routing · request IDs]
+    GW --> API1[API]
+    GW --> API2[API ...]
+    GW -- Pay · webhooks --> PAY[Payments service]
     PAY -- "order lookup (HTTP)" --> API1
     PAY --> PM[(MySQL<br/>scalecart_payments)]
     PAY <-- "payment.captured /<br/>order.payment_result" --> Q
@@ -60,9 +62,12 @@ flowchart LR
     W --> Q[[RabbitMQ<br/>quorum queues · DLQ]]
     Q --> W
     W --> MP[Mail<br/>Mailpit]
-    P[Prometheus + Grafana] -. scrapes .-> API1 & W & PAY
+    P[Prometheus + Grafana] -. scrapes .-> GW & API1 & W & PAY
 ```
 
+- **One front door:** NGINX serves the shop's files and stops floods; every API request then goes through **Kong**, the
+  API gateway, which checks login tokens, sends the request to the shop or payments, blocks internal routes and gives
+  each request an `X-Request-ID`. The services still verify tokens themselves.
 - **Modular monolith + one service:** identity, catalog, inventory, cart, orders, drops and AI are modules of the shop.
   Each owns its own MySQL database and talks to the others only through services. **Payments** has been split out as
   its own service (`apps/payments`, own DB user): one HTTP call to the shop at "Pay", events through RabbitMQ for the rest.
@@ -122,8 +127,9 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e        # shop: 65 unit, 180 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
-cd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 24 end-to-end
+cd apps/api; npm test; npm run test:e2e        # shop: 68 unit, 180 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
+cd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 25 end-to-end
+node infra/kong/check-gateway.mjs              # 16 gateway rules against the running stack (tokens, routes, 404s)
 cd apps/web; npm test                          # 25 component tests with a fake API
 ```
 
@@ -150,10 +156,10 @@ apps/api/              NestJS: one folder per module; dist/main.js = API, dist/w
 apps/payments/         NestJS: the payments service (Razorpay, its own database and outbox)
 apps/web/              React + Tailwind storefront and admin area (Vite)
 apps/demo/             the earlier one-page demo (/demo/)
-infra/                 MySQL init, NGINX, Prometheus, Grafana (dashboards provisioned automatically)
+infra/                 MySQL init, NGINX (edge), Kong (API gateway), Prometheus, Grafana (dashboards provisioned automatically)
 k8s/                   kind cluster, probes, autoscaler
 load-tests/            k6 scripts and the runner
-docs/experiments/      E0–E11: every experiment with its real numbers
+docs/experiments/      E0–E12: every experiment with its real numbers
 docs/interview-notes/  how to explain each phase: story → proof → fix → trade-off
 ```
 
@@ -161,7 +167,7 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service |
-| Next | API gateway · distributed tracing · cloud load tests |
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong) |
+| Next | Distributed tracing · cloud load tests |
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

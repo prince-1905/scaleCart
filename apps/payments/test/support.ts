@@ -78,12 +78,15 @@ export class FakeShop {
   readonly orders = new Map<string, ShopOrder>();
   mode: 'up' | 'down' | 'slow' = 'up';
   calls = 0;
+  /** The X-Request-ID of each call (undefined when none was sent). */
+  readonly requestIds: (string | undefined)[] = [];
   private server?: Server;
   url = '';
 
   async start() {
     this.server = createServer((req, res) => {
       this.calls++;
+      this.requestIds.push(req.headers['x-request-id'] as string | undefined);
       if (req.headers['x-service-token'] !== SERVICE_TOKEN) return res.writeHead(401).end();
       const id = /^\/internal\/orders\/([^/]+)$/.exec(req.url ?? '')?.[1] ?? '';
       const answer = () => {

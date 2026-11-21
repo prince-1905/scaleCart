@@ -72,34 +72,12 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('phase 2 on %s', (adapter
     });
   });
 
-  describe('login throttling', () => {
-    const fail = (u: TestUser) =>
-      http(app).post('/auth/login').send({ email: u.email, password: 'wrong-password' });
-
-    it('refuses logins for an account after 5 failures, even with the right password', async () => {
-      const user = await registerUser(app);
-      for (let i = 0; i < 5; i++) await fail(user).expect(401);
-
-      const blocked = await http(app)
-        .post('/auth/login')
-        .send({ email: user.email, password: user.password })
-        .expect(429);
-      expect(blocked.body).toMatchObject({ error: 'too_many_failed_logins' });
-      expect(blocked.body.retryAfterSeconds).toBeGreaterThan(0);
-    });
-
-    it('resets the count after a successful login', async () => {
-      const user = await registerUser(app);
-      for (let i = 0; i < 4; i++) await fail(user).expect(401);
-      await http(app).post('/auth/login').send({ email: user.email, password: user.password }).expect(200);
-      for (let i = 0; i < 4; i++) await fail(user).expect(401);
-    });
-  });
+  // Login throttling moved to the identity service with logins (Phase 11): apps/identity/test.
 
   it('serves the OpenAPI document and Swagger UI', async () => {
     const doc = await http(app).get('/docs-json').expect(200);
     expect(Object.keys(doc.body.paths)).toEqual(
-      expect.arrayContaining(['/auth/login', '/products/{id}', '/checkout']),
+      expect.arrayContaining(['/products/{id}', '/checkout']),
     );
     await http(app).get('/docs').expect(200);
   });
@@ -117,13 +95,12 @@ describe('without Redis (fail open)', () => {
     await app.close();
   });
 
-  it('still serves products, logins and checkout', async () => {
+  it('still serves products and checkout', async () => {
     const admin = await registerAdmin(app);
     const id = await createProduct(app, admin, { stock: 1 });
     await http(app).get(`/products/${id}`).expect(200);
 
     const user = await registerUser(app);
-    await http(app).post('/auth/login').send({ email: user.email, password: 'wrong-password' }).expect(401);
     await http(app)
       .put(`/cart/items/${id}`)
       .auth(user.accessToken, { type: 'bearer' })

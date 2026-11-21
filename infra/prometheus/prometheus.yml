@@ -28,6 +28,14 @@ scrape_configs:
         port: 3002
         refresh_interval: 5s
 
+  # Phase 11: the identity service (logins: Argon2 time, 2FA, rate limits).
+  - job_name: identity
+    dns_sd_configs:
+      - names: [identity]
+        type: A
+        port: 3003
+        refresh_interval: 5s
+
   # Phase 9: the API gateway (Kong's status listener). Per-route requests, Kong's own latency vs the service's.
   - job_name: gateway
     static_configs:

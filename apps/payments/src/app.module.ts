@@ -3,6 +3,7 @@ import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthGuard } from './common/auth.js';
+import { JwksKeys } from './common/jwks-keys.js';
 import { ENV, type PaymentsEnv } from './config/env.js';
 import { mysqlOptions } from './database/database.js';
 import { HealthController } from './health/health.controller.js';
@@ -33,10 +34,9 @@ export class AppModule {
         loggerModule(env),
         ObservabilityModule,
         TypeOrmModule.forRoot({ ...mysqlOptions(env.db), retryAttempts: 5, retryDelay: 2_000 }),
-        // Verify only, with exactly the shop's settings: same secret, algorithm, issuer and audience.
+        // Verify only (Phase 11): RS256 with identity's public keys (JwksKeys); no secret here.
         JwtModule.register({
-          secret: env.jwtSecret,
-          verifyOptions: { algorithms: ['HS256'], issuer: 'scalecart', audience: 'scalecart-api' },
+          verifyOptions: { algorithms: ['RS256'], issuer: 'scalecart', audience: 'scalecart-api' },
         }),
       ],
       controllers: [PaymentsController, HealthController],
@@ -52,6 +52,7 @@ export class AppModule {
                 ? new RazorpayGateway(env.razorpayKeyId, env.razorpayKeySecret)
                 : null,
         },
+        JwksKeys,
         { provide: APP_GUARD, useClass: AuthGuard },
         {
           provide: APP_PIPE,

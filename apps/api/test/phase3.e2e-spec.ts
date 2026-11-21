@@ -10,6 +10,7 @@ import {
   dataSource,
   eventually,
   http,
+  identity,
   mailpitCount,
   registerAdmin,
   registerUser,
@@ -74,6 +75,34 @@ describe('order events (outbox â†’ RabbitMQ â†’ email)', () => {
       [order.id],
     );
     expect(event.publishedAt).not.toBeNull();
+  });
+
+  it('the email goes out while the identity service is DOWN: the address travels in the event (E14b)', async () => {
+    const user = await registerUser(api);
+    identity.mode = 'down';
+    try {
+      const order = (await buy(api, user, productId)).body;
+      await eventually(async () => (await mailpitCount(`Order ${order.id}`)) === 1);
+      const [row] = await dataSource(api, 'orders').query('SELECT payload FROM outbox WHERE aggregate_id = ?', [order.id]);
+      expect(row.payload.email).toBe(user.email);
+    } finally {
+      identity.mode = 'up';
+    }
+  });
+
+  it('an older event without the address: the worker asks identity for it', async () => {
+    const user = await registerUser(api);
+    const order = (await buy(api, user, productId)).body;
+    await eventually(async () => (await mailpitCount(`Order ${order.id}`)) === 1);
+    // Replay the same order as a pre-E14b event (no email field) under a new event id: the worker has to ask identity
+    // for the address, so a second email proves the lookup worked. (Which test process's fake identity answers depends
+    // on which worker takes the message: they share the test queue, so this doesn't count calls on our fake.)
+    const [row] = await dataSource(api, 'orders').query('SELECT payload FROM outbox WHERE aggregate_id = ?', [order.id]);
+    const { email: _email, ...legacy } = { ...row.payload, eventId: randomUUID() };
+    const rabbit = worker.get(RabbitService);
+    rabbit.publishEvent(ORDER_CREATED, legacy, { messageId: legacy.eventId, type: ORDER_CREATED });
+    await rabbit.confirm();
+    await eventually(async () => (await mailpitCount(`Order ${order.id}`)) === 2);
   });
 
   it('sends one email even when the same event is delivered three times', async () => {

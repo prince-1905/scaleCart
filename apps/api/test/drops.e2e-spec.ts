@@ -135,8 +135,7 @@ describe('drops and the waiting room', () => {
     // when the clock is stepped back right after their ticket was called.
     const { dropId, productId } = await newDrop({ startsInMs: 2_000 });
     const user = await registerUser(app);
-    const me = (await http(app).get('/auth/me').auth(user.accessToken, { type: 'bearer' }).expect(200)).body;
-    const pass = new DropPassSigner(TEST_ENV.JWT_SECRET!).sign({ d: dropId, u: me.id, t: 1, exp: Date.now() + 60_000 });
+    const pass = new DropPassSigner(TEST_ENV.JWT_SECRET!).sign({ d: dropId, u: user.id, t: 1, exp: Date.now() + 60_000 });
 
     expect((await buy(user, productId)).body.error).toBe('drop_not_started'); // no pass: the clock decides
     expect((await buy(user, productId, pass)).status).toBe(201);
@@ -214,7 +213,7 @@ describe('drops and the waiting room', () => {
     expect(res.body.error).toBe('out_of_stock');
     const rows = await dataSource(app, 'drops').query('SELECT 1 FROM drop_purchases WHERE drop_id = ? AND user_id = ?', [
       dropId,
-      (await http(app).get('/auth/me').auth(loser.accessToken, { type: 'bearer' })).body.id ?? '',
+      loser.id,
     ]);
     expect(rows).toHaveLength(0);
   });
@@ -407,8 +406,7 @@ describe('drops when Redis is down', () => {
     expect(queued.body.error).toBe('waiting_room_unavailable');
 
     // A pass issued before Redis went down (signed the same way the app signs them).
-    const me = (await http(app).get('/auth/me').auth(user.accessToken, { type: 'bearer' }).expect(200)).body;
-    const pass = new DropPassSigner(TEST_ENV.JWT_SECRET!).sign({ d: drop.id, u: me.id, t: 1, exp: Date.now() + 60_000 });
+    const pass = new DropPassSigner(TEST_ENV.JWT_SECRET!).sign({ d: drop.id, u: user.id, t: 1, exp: Date.now() + 60_000 });
     await http(app).put(`/cart/items/${productId}`).auth(user.accessToken, { type: 'bearer' }).send({ quantity: 1 }).expect(200);
     await http(app)
       .post('/checkout')

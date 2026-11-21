@@ -60,7 +60,7 @@ export class OrdersController {
         'Idempotency-Key header is required: 8-128 characters of letters, digits, - or _',
       );
     }
-    const result = await this.checkoutService.checkout(user.id, key, dto);
+    const result = await this.checkoutService.checkout(user.id, key, dto, user.email);
     if (result.replayed) {
       this.adapterHost.httpAdapter.setHeader(res, 'idempotent-replayed', 'true');
     }

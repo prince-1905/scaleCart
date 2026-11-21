@@ -583,6 +583,27 @@ the admin API: 0 errors.
 lock found from one trace (3 of 3). 59 of 60 payment traces complete across RabbitMQ. Cost at 300 req/s: shop CPU ≈39%
 → ≈53% (every request) / ≈49% (10% sampled). Jaeger down: 0 failed requests.
 
+### T. Logging in, since identity is its own service (Phase 11)
+
+```
+ POST /auth/login     Kong → identity: Argon2 check (+ 2FA) → access token signed with identity's PRIVATE key
+                      (RS256, header kid = key id, claims: user id, role, email) + refresh token
+ any other request    Kong checks the token with identity's PUBLIC key for that kid → shop / payments check it again
+                      with the public keys from /.well-known/jwks.json (kept in memory; fetched again when a new kid
+                      shows up). No call to identity per request.
+ checkout             the email from the token goes into the order.created event → the confirmation email never needs
+                      identity (an outage can't lose it)
+ admin order list     emails asked from identity (GET /internal/users?ids=…, service token); identity down = list
+                      without emails, not an error
+ key rotation         node infra/identity/new-signing-key.mjs --rotate → Kong reload + identity restart → old tokens
+                      still valid → --prune after 15 min
+```
+
+**Analogy:** only the passport office has the stamp; every border guard has a picture of it to compare against.
+**Measured (E14):** 15 logins/s next to shoppers: shoppers' p95 14–15 ms, 0 errors (before the split: 6–7 s, timeouts).
+Identity down 60 s: signed-in shoppers 100% ok; confirmation emails first lost, then fixed (sent within 0.3 s).
+RS256 check ~154–167 µs vs HS256 ~113–124 µs. Key rotation under traffic: 0 errors.
+
 ---
 
 ## 6. How we watch it (observability)

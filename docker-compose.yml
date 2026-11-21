@@ -23,6 +23,7 @@ services:
       MYSQL_USER: scalecart
       MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env (see .env.example)}
       # Phase 8: the payments service's own login (created by infra/mysql/init/02-payments-user.sh).
+      IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?set IDENTITY_DB_PASSWORD in .env (see .env.example)}
       PAYMENTS_DB_PASSWORD: ${PAYMENTS_DB_PASSWORD:?set PAYMENTS_DB_PASSWORD in .env (see .env.example)}
     command:
       # Keep the whole working set in memory, so experiments measure queries, not disk.
@@ -136,6 +137,8 @@ services:
       # asking the payments service ("paid after all?").
       PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-900}
       PAYMENTS_URL: http://payments:3002
+      # Phase 11: confirmation emails need the customer's address, from the identity service.
+      IDENTITY_URL: http://identity:3003
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
       PAYMENT_JOBS_INTERVAL_SECONDS: ${PAYMENT_JOBS_INTERVAL_SECONDS:-30}
       NODE_OPTIONS: --max-old-space-size=192
@@ -193,7 +196,10 @@ services:
       LAB_ENDPOINTS: "true"
       # atomic (correct) | locking | naive (oversells) - for experiment E1 only.
       STOCK_RESERVATION: ${STOCK_RESERVATION:-atomic}
+      # Since Phase 11 only for the shop's own HMACs (drop passes): login tokens are signed by identity.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
+      # Phase 11: identity's public keys (JWKS) check access tokens; users' emails come from there too.
+      IDENTITY_URL: http://identity:3003
       REDIS_URL: redis://redis:6379
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
       # Node's default is 511; bursts overflowed it (E2). Capped by net.core.somaxconn (4096).
@@ -220,8 +226,6 @@ services:
       RATE_LIMIT_CHECKOUT: ${RATE_LIMIT_CHECKOUT:-5:0.5}
       # NGINX sets X-Real-IP to the connecting address; the API is only reachable through NGINX.
       TRUST_PROXY: "true"
-      # Two-step login (Phase 6b): encrypts authenticator secrets; empty = derived from JWT_SECRET.
-      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       # Explicit heap cap (~75% of the memory limit) instead of V8's container-derived default.
       NODE_OPTIONS: --max-old-space-size=384
     depends_on:
@@ -246,6 +250,73 @@ services:
 
   # Phase 8: payments as its own service (apps/payments): own image, own MySQL login and database, own process.
   # NGINX routes /orders/:id/payment and /payments/* here; it talks to the shop only via events and /internal calls.
+  # Phase 11: identity as its own service (apps/identity): users, passwords, refresh tokens, 2FA, and the ONLY holder of
+  # the private key that signs access tokens. Kong routes /auth/* here; everyone else checks tokens with its public keys.
+  identity-migrate:
+    build: ./apps/identity
+    image: scalecart/identity:dev
+    command: ["node", "dist/database/migrate.js"]
+    environment: &identity-db-env
+      DB_HOST: mysql
+      DB_PORT: 3306
+      IDENTITY_DB_USER: identity
+      IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?set IDENTITY_DB_PASSWORD in .env (see .env.example)}
+      IDENTITY_DB_NAME: scalecart_identity
+      # For the seed (node dist/seed.js): the admin and the load-test users.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SEED_USER_PASSWORD: ${SEED_USER_PASSWORD:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  identity:
+    build: ./apps/identity
+    image: scalecart/identity:dev
+    environment:
+      <<: *identity-db-env
+      PORT: 3003
+      DB_POOL_SIZE: ${IDENTITY_DB_POOL_SIZE:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRACING_ENABLED: ${TRACING_ENABLED:-true}
+      TRACING_SAMPLE_RATIO: ${TRACING_SAMPLE_RATIO:-1}
+      OTEL_SERVICE_NAME: identity
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      HTTP_ACCESS_LOG: ${HTTP_ACCESS_LOG:-false}
+      # The private key: only this service gets it (made by infra/identity/new-signing-key.mjs).
+      IDENTITY_SIGNING_KEY: ${IDENTITY_SIGNING_KEY:?run node infra/identity/new-signing-key.mjs}
+      IDENTITY_SIGNING_KEY_ID: ${IDENTITY_SIGNING_KEY_ID:?run node infra/identity/new-signing-key.mjs}
+      IDENTITY_EXTRA_PUBLIC_KEYS: ${IDENTITY_EXTRA_PUBLIC_KEYS:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
+      REDIS_URL: redis://redis:6379
+      # 2FA secrets at rest: encrypted with a key derived from TOTP_ENCRYPTION_KEY, or JWT_SECRET when empty (as before
+      # the split, so existing 2FA users keep working). Neither signs tokens any more.
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_AUTH: ${RATE_LIMIT_AUTH:-10:0.2}
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-60:20}
+      TRUST_PROXY: "true"
+      NODE_OPTIONS: --max-old-space-size=384
+    depends_on:
+      identity-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    deploy:
+      replicas: ${IDENTITY_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "${IDENTITY_CPUS:-1.0}"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+
   payments-migrate:
     build: ./apps/payments
     image: scalecart/payments:dev
@@ -275,8 +346,8 @@ services:
       OTEL_SERVICE_NAME: payments
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
       HTTP_ACCESS_LOG: ${HTTP_ACCESS_LOG:-false}
-      # Verifies the shop's login tokens (verify only, same secret).
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
+      # Phase 11: checks customers' tokens with identity's public keys (JWKS). No secret here: it can't create tokens.
+      IDENTITY_URL: http://identity:3003
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
       SHOP_URL: http://api:3000
       SHOP_TIMEOUT_MS: ${SHOP_TIMEOUT_MS:-1000}
@@ -346,7 +417,8 @@ services:
     image: kong:3.9.4
     entrypoint: ["/bin/sh", "/kong/start.sh"]
     environment:
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      # Phase 11: only identity's PUBLIC keys (no secret): Kong checks tokens, it can't create them.
+      IDENTITY_PUBLIC_KEYS: ${IDENTITY_PUBLIC_KEYS:?run node infra/identity/new-signing-key.mjs}
       KONG_DATABASE: "off"
       KONG_DECLARATIVE_CONFIG: /tmp/kong.yml
       KONG_PROXY_LISTEN: 0.0.0.0:8000 reuseport backlog=16384

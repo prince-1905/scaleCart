@@ -41,7 +41,6 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('api on %s', (adapter) =>
   it('GET /health/ready pings every module database', async () => {
     const res = await http(app).get('/health/ready').expect(200);
     expect(Object.keys(res.body.info)).toEqual([
-      'db_identity',
       'db_catalog',
       'db_inventory',
       'db_cart',

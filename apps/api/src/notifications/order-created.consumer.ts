@@ -77,7 +77,9 @@ export class OrderCreatedConsumer implements OnApplicationBootstrap {
       return;
     }
 
-    const to = await this.users.getEmail(event.userId);
+    // The event carries the address since E14b: no call to identity, so an identity outage can't lose this email.
+    // Older events don't: ask identity (if it's down this throws, and the message is retried).
+    const to = event.email ?? (await this.users.getEmail(event.userId));
     if (!to) {
       this.metrics.notifications.inc({ outcome: 'no_recipient' });
       return;

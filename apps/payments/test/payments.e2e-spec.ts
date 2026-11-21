@@ -1,9 +1,11 @@
 import type { INestApplication } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { randomUUID } from 'node:crypto';
 import { RabbitService } from '../src/messaging/rabbit.service.js';
 import { EVENTS } from '../src/messaging/topology.js';
 import { PaymentJobs } from '../src/payments/payment-jobs.js';
 import { signCheckout, signWebhook } from '../src/payments/signatures.js';
+import { FakeIdentity } from './fake-identity.js';
 import { FakeRazorpay, webhookBody } from './fake-razorpay.js';
 import {
   customerToken,
@@ -12,6 +14,7 @@ import {
   eventually,
   FakeShop,
   http,
+  identity,
   KEY_SECRET,
   SERVICE_TOKEN,
   startPayments,
@@ -372,5 +375,47 @@ describe('payments service without Razorpay keys', () => {
       await app.close();
       shop.stop();
     }
+  });
+});
+
+describe('customer tokens (Phase 11: signed by identity, checked here with its public key)', () => {
+  let app: INestApplication;
+  let shop: FakeShop;
+  beforeAll(async () => {
+    shop = await new FakeShop().start();
+    app = await startPayments(new FakeRazorpay(), shop.url);
+  });
+  afterAll(async () => {
+    await app.close();
+    shop.stop();
+  });
+
+  const pay = (token: string) => http(app).post(`/orders/${randomUUID()}/payment`).auth(token, { type: 'bearer' });
+
+  it("a token from identity's key passes (the order is unknown here: 404, not 401)", async () => {
+    await pay(customerToken().token).expect(404);
+  });
+
+  it('a token signed with any other key is refused, even with the right key id', async () => {
+    const stranger = await new FakeIdentity(SERVICE_TOKEN).start(); // its own, different key pair
+    try {
+      await pay(stranger.sign({ sub: randomUUID(), role: 'customer' })).expect(401);
+    } finally {
+      stranger.stop();
+    }
+  });
+
+  it('the old shared-secret kind (HS256) is refused: only RS256 is accepted, whatever the token says', async () => {
+    const hs256 = new JwtService({ secret: 'test-only-secret-0123456789abcdefghijklmnop' }).sign(
+      { sub: randomUUID(), role: 'customer' },
+      { issuer: 'scalecart', audience: 'scalecart-api', expiresIn: 900, keyid: identity.kid },
+    );
+    await pay(hs256).expect(401);
+  });
+
+  it('an unknown key id, an expired token or the 2FA challenge audience are refused', async () => {
+    await pay(identity.sign({ sub: randomUUID(), role: 'customer' }, { kid: 'nobody-knows-this-key' })).expect(401);
+    await pay(identity.sign({ sub: randomUUID(), role: 'customer' }, { expiresIn: -10 })).expect(401);
+    await pay(identity.sign({ sub: randomUUID(), role: 'customer' }, { audience: 'scalecart-2fa' })).expect(401);
   });
 });

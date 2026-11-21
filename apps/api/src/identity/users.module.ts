@@ -1,14 +1,13 @@
 import { Module } from '@nestjs/common';
-import { moduleTypeOrm } from '../database/module-typeorm.js';
-import { identityDatabase } from './identity.database.js';
+import { ObservabilityModule } from '../observability/observability.module.js';
 import { UserDirectory } from './user-directory.js';
 
 /**
- * Identity's data access, without the HTTP side (login endpoints, guard, JWT).
- * The worker imports only this; the API's IdentityModule builds on it.
+ * Users' emails from the identity service (HTTP, Phase 11). The worker (confirmation emails) and the admin order
+ * pages import this; neither has access to identity's database any more.
  */
 @Module({
-  imports: [...moduleTypeOrm(identityDatabase)],
+  imports: [ObservabilityModule],
   providers: [UserDirectory],
   exports: [UserDirectory],
 })

@@ -156,6 +156,20 @@ export class MetricsService {
   });
 
   /** Calls from the shop to the payments service: ok, error, open (refused by the circuit breaker). */
+  /** Calls to the identity service (Phase 11): users' emails. ok, error (after the retry), timeout, open (breaker). */
+  readonly identityCalls = new Counter({
+    name: 'identity_service_calls_total',
+    help: 'Calls from the shop to the identity service, by operation and result.',
+    labelNames: ['op', 'result'] as const,
+    registers: [this.registry],
+  });
+
+  readonly identityBreaker = new Gauge({
+    name: 'identity_circuit_breaker_state',
+    help: 'Circuit breaker for calls to the identity service: 0 closed, 0.5 half-open, 1 open.',
+    registers: [this.registry],
+  });
+
   readonly paymentsCalls = new Counter({
     name: 'payments_service_calls_total',
     help: 'Calls from the shop to the payments service, by operation and result.',

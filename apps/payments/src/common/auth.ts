@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { JwksKeys } from './jwks-keys.js';
 import { timingSafeEqual } from 'node:crypto';
 import { ENV, type PaymentsEnv } from '../config/env.js';
 
@@ -30,8 +31,9 @@ export const CurrentUser = createParamDecorator(
 );
 
 /**
- * Global guard. Customers: the shop's access token (HS256, same secret, same issuer and audience). The shop
- * itself: the service token on /internal/* routes.
+ * Global guard. Customers: an access token from the identity service (Phase 11: RS256, checked with identity's public
+ * keys by the token's `kid`; this service holds no secret that could create one). The shop itself: the service token
+ * on /internal/* routes.
  */
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -40,6 +42,7 @@ export class AuthGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly jwt: JwtService,
+    private readonly keys: JwksKeys,
     @Inject(ENV) env: PaymentsEnv,
   ) {
     this.serviceToken = Buffer.from(env.serviceToken);
@@ -62,7 +65,11 @@ export class AuthGuard implements CanActivate {
     const [scheme, token] = String(req.headers.authorization ?? '').split(' ');
     if (scheme !== 'Bearer' || !token) throw new UnauthorizedException('missing bearer token');
     try {
-      const claims = await this.jwt.verifyAsync<{ sub: string; role: AuthUser['role'] }>(token);
+      const kid = (this.jwt.decode(token, { complete: true }) as { header?: { kid?: string } } | null)?.header?.kid;
+      const publicKey = await this.keys.publicKeyFor(kid);
+      if (!publicKey) throw new Error('unknown key id');
+      // RS256, issuer and audience pinned by the module's verifyOptions: the token's own "alg" is never trusted.
+      const claims = await this.jwt.verifyAsync<{ sub: string; role: AuthUser['role'] }>(token, { publicKey });
       req.user = { id: claims.sub, role: claims.role } satisfies AuthUser;
     } catch {
       throw new UnauthorizedException('invalid or expired access token');

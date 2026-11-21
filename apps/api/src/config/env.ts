@@ -52,9 +52,14 @@ export interface Env {
   labEndpoints: boolean;
   serviceName: string;
   db: DbConfig;
+  /**
+   * Since Phase 11 NOT for login tokens (identity signs those with its private key; the shop checks them with the
+   * public keys). Only the shop's own HMACs: the drop "pass" of the waiting room.
+   */
   jwtSecret: string;
-  accessTokenTtlSeconds: number;
-  refreshTokenTtlDays: number;
+  /** The identity service inside the network (Phase 11): its public keys (JWKS) and users' emails. */
+  identityUrl: string;
+  identityTimeoutMs: number;
   stockReservation: StockReservationStrategy;
   /**
    * Size of the kernel queue for connections not yet accepted by Node. Node's default
@@ -66,9 +71,6 @@ export interface Env {
   /** Cache-aside for public product reads. Off = every read goes to MySQL (for experiments). */
   cacheEnabled: boolean;
   cacheTtlSeconds: number;
-  /** Failed logins per email within the window before login is refused with 429. */
-  loginMaxFailures: number;
-  loginFailureWindowSeconds: number;
   /** Serves the Swagger UI at /docs and the OpenAPI document at /docs-json. */
   apiDocs: boolean;
   role: ProcessRole;
@@ -116,11 +118,6 @@ export interface Env {
   rateLimits: Record<RateLimitPolicy, BucketSize>;
   /** Behind NGINX: take the client IP from X-Real-IP. Never enable without a proxy that sets it. */
   trustProxy: boolean;
-  /** Encrypts authenticator-app secrets at rest. Empty = derived from JWT_SECRET (rotating that then needs a re-encrypt). */
-  totpEncryptionKey: string;
-  /** Wrong 2FA codes before the account's code check is locked (counted in MySQL, even for parallel guesses). */
-  twoFactorMaxFailures: number;
-  twoFactorLockSeconds: number;
 }
 
 function bool(value: string | undefined, fallback: boolean): boolean {
@@ -220,15 +217,13 @@ export function loadEnv(
     serviceName: source.SERVICE_NAME ?? `scalecart-${role}`,
     db: loadDbConfig(source),
     jwtSecret,
-    accessTokenTtlSeconds: positiveInt(source, 'ACCESS_TOKEN_TTL_SECONDS', 900),
-    refreshTokenTtlDays: positiveInt(source, 'REFRESH_TOKEN_TTL_DAYS', 30),
+    identityUrl: (source.IDENTITY_URL ?? 'http://127.0.0.1:3003').replace(/\/$/, ''),
+    identityTimeoutMs: positiveInt(source, 'IDENTITY_TIMEOUT_MS', 1_000),
     stockReservation,
     listenBacklog: positiveInt(source, 'HTTP_LISTEN_BACKLOG', 4096),
     redisUrl: source.REDIS_URL ?? 'redis://127.0.0.1:6379',
     cacheEnabled: bool(source.CACHE_ENABLED, true),
     cacheTtlSeconds: positiveInt(source, 'CACHE_TTL_SECONDS', 60),
-    loginMaxFailures: positiveInt(source, 'LOGIN_MAX_FAILURES', 5),
-    loginFailureWindowSeconds: positiveInt(source, 'LOGIN_FAILURE_WINDOW_SECONDS', 900),
     apiDocs: bool(source.API_DOCS, true),
     role,
     notifyMode,
@@ -259,9 +254,6 @@ export function loadEnv(
       checkout: bucketSize(source, 'RATE_LIMIT_CHECKOUT', '5:0.5'),
     },
     trustProxy: bool(source.TRUST_PROXY, false),
-    totpEncryptionKey: source.TOTP_ENCRYPTION_KEY ?? '',
-    twoFactorMaxFailures: positiveInt(source, 'TWO_FACTOR_MAX_FAILURES', 5),
-    twoFactorLockSeconds: positiveInt(source, 'TWO_FACTOR_LOCK_SECONDS', 900),
   };
 }
 

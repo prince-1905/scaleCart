@@ -16,6 +16,7 @@ import { createApp, listen } from '../src/app.factory.js';
 import { RedisService } from '../src/cache/redis.service.js';
 import { RabbitService } from '../src/messaging/rabbit.service.js';
 import { WorkerModule } from '../src/worker/worker.module.js';
+import { FakeIdentity } from './fake-identity.js';
 import { loadEnv, type HttpAdapterName } from '../src/config/env.js';
 import type { ModuleName } from '../src/database/database.js';
 
@@ -27,6 +28,12 @@ if (!process.env.DB_PASSWORD) {
     'e2e tests need DB_PASSWORD: copy .env.example to .env at the repo root',
   );
 }
+
+/** Phase 8/11: the shared token for /internal/* calls between the services (tests only). */
+export const SERVICE_TOKEN = 'test-internal-service-token-0123456789abcdef';
+
+/** The identity service's stand-in (Phase 11): signs the test users' tokens, serves the public key and their emails. */
+export const identity = await new FakeIdentity(SERVICE_TOKEN).start();
 
 /**
  * E2E tests run against the Compose MySQL (localhost:3307) in their own databases
@@ -45,8 +52,10 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   MQ_PREFIX: 'test.',
   SMTP_HOST: '127.0.0.1',
   SMTP_PORT: '1025',
-  // Signs tokens for throwaway test apps only; never used by a real deployment.
+  // Phase 11: no longer for login tokens (identity signs those); only the shop's own HMACs (drop passes).
   JWT_SECRET: 'test-only-secret-0123456789abcdefghijklmnop',
+  // The identity service's stand-in: its public key checks the test users' tokens, and it answers email lookups.
+  IDENTITY_URL: identity.url,
   HTTP_ACCESS_LOG: 'false',
   LOG_LEVEL: 'silent',
   // Tests reset the drop counters themselves (resetGates), never on a timer in the middle of a test.
@@ -55,7 +64,7 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   // rate-limit.e2e-spec.ts turns it on with small buckets.
   RATE_LIMIT_ENABLED: 'false',
   // Phase 8: the shared token for /internal/* calls between the shop and the payments service (tests only).
-  INTERNAL_SERVICE_TOKEN: 'test-internal-service-token-0123456789abcdef',
+  INTERNAL_SERVICE_TOKEN: SERVICE_TOKEN,
 };
 
 export async function startApp(
@@ -162,34 +171,25 @@ export const unique = (prefix: string) =>
   `${prefix}-${randomUUID().slice(0, 8)}`;
 
 export interface TestUser {
+  id: string;
   email: string;
-  password: string;
   accessToken: string;
-  refreshToken: string;
 }
 
-export async function registerUser(app: INestApplication): Promise<TestUser> {
-  const email = `${unique('user')}@test.local`;
-  const password = 'correct-horse-battery';
-  const res = await http(app)
-    .post('/auth/register')
-    .send({ email, password })
-    .expect(201);
-  return { email, password, ...res.body };
+/**
+ * A customer, as the identity service would create one (Phase 11): users live in identity now, so the shop's tests
+ * get a user id, an email the fake identity will answer for, and an access token signed with its key. `app` is unused
+ * but kept, so the many tests calling registerUser(app) didn't change.
+ */
+export async function registerUser(_app?: INestApplication, role: 'customer' | 'admin' = 'customer'): Promise<TestUser> {
+  const id = randomUUID();
+  // The address every fake identity derives from the id (see fake-identity.ts), so any test process agrees on it.
+  const email = `u-${id}@test.local`;
+  return { id, email, accessToken: identity.sign({ sub: id, role, email }) };
 }
 
-export async function registerAdmin(app: INestApplication): Promise<TestUser> {
-  const user = await registerUser(app);
-  await dataSource(app, 'identity').query(
-    `UPDATE users SET role = 'admin' WHERE email = ?`,
-    [user.email],
-  );
-  // The role is inside the access token, so log in again to get one that says admin.
-  const res = await http(app)
-    .post('/auth/login')
-    .send({ email: user.email, password: user.password })
-    .expect(200);
-  return { ...user, ...res.body };
+export async function registerAdmin(app?: INestApplication): Promise<TestUser> {
+  return registerUser(app, 'admin');
 }
 
 export async function createProduct(

@@ -20,15 +20,13 @@ describe('loadEnv', () => {
         poolSize: 5,
       },
       jwtSecret: SECRET,
-      accessTokenTtlSeconds: 900,
-      refreshTokenTtlDays: 30,
+      identityUrl: 'http://127.0.0.1:3003',
+      identityTimeoutMs: 1000,
       stockReservation: 'atomic',
       listenBacklog: 4096,
       redisUrl: 'redis://127.0.0.1:6379',
       cacheEnabled: true,
       cacheTtlSeconds: 60,
-      loginMaxFailures: 5,
-      loginFailureWindowSeconds: 900,
       apiDocs: true,
       role: 'api',
       notifyMode: 'outbox',
@@ -59,9 +57,6 @@ describe('loadEnv', () => {
         checkout: { capacity: 5, refillPerSecond: 0.5 },
       },
       trustProxy: false,
-      totpEncryptionKey: '',
-      twoFactorMaxFailures: 5,
-      twoFactorLockSeconds: 900,
     });
   });
 

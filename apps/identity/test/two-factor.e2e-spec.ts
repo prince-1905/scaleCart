@@ -1,7 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
-import type { HttpAdapterName } from '../src/config/env.js';
 import { hotp, totpStep } from '../src/identity/totp.js';
-import { dataSource, http, registerUser, startApp, type TestUser } from './support.js';
+import { dataSource, http, registerUser, startIdentity, type TestUser } from './support.js';
 
 /** The authenticator app's side: base32 secret → current code (optionally a few steps ahead). */
 function base32Decode(text: string): Buffer {
@@ -23,11 +22,11 @@ const codeFor = (secret: string, stepsAhead = 0) => hotp(base32Decode(secret), t
 
 const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
 
-describe.each<HttpAdapterName>(['fastify', 'express'])('two-factor login on %s', (adapter) => {
+describe('two-factor login (moved from the shop, Phase 11)', () => {
   let app: INestApplication;
 
   beforeAll(async () => {
-    app = await startApp(adapter, { TWO_FACTOR_MAX_FAILURES: '5' });
+    app = await startIdentity({ TWO_FACTOR_MAX_FAILURES: '5' });
   });
   afterAll(async () => {
     await app.close();

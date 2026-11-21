@@ -36,6 +36,11 @@ const CHALLENGE_TTL_SECONDS = 300;
 export interface AccessTokenClaims {
   sub: string;
   role: Role;
+  /**
+   * The user's own address (Phase 11, E14b). Services that need it (the confirmation email) take it from here and
+   * never have to call identity for it, so an identity outage can't hold up or lose an email.
+   */
+  email: string;
 }
 
 /**
@@ -175,7 +180,7 @@ export class AuthService {
   }
 
   private async issueTokens(user: User, familyId: string): Promise<TokenPair> {
-    const claims: AccessTokenClaims = { sub: user.id, role: user.role };
+    const claims: AccessTokenClaims = { sub: user.id, role: user.role, email: user.email };
     const accessToken = await this.jwt.signAsync(claims);
 
     const refreshToken = randomBytes(32).toString('base64url');

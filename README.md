@@ -32,6 +32,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | Payments shared one process with the shop: a shop crash also refused Razorpay's webhooks | Payments split into its own service: one sync call (timeout, retry, circuit breaker), everything else as events with an outbox on both sides | Shop down 60 s: **60/60 webhooks accepted**, all orders paid 4–5 s after restart. Payments down: browsing and checkout unchanged. Cost: ~1 ms per hop (p99 8–26 ms), order paid ~0.1 s after the webhook | [E11](docs/experiments/E11-payments-service.md) |
 | Every fake login token cost the shop CPU: a flood of 1,000/s, each token different, slips past per-token limits | Kong API gateway in front of the services: token check at the door, routing, request IDs | Shop CPU under the flood **15–16% vs 50–52%** (no attack: 14–17%), shoppers' p95 **9–16 ms vs 23–36 ms**. Cost: ~1 ms per request. Found: NGINX's default health check kept customers out **13 s** after Kong was back (fixed: ~0.2 s) | [E12](docs/experiments/E12-api-gateway.md) |
 | "Pay is slow" — but where? Metrics can't say, and one payment touches 3 services and 2 queue hops | Distributed tracing: OpenTelemetry in every service, Kong starts the trace, the outbox carries it through RabbitMQ, Jaeger shows it | Over 20 Pays: **79% of the time is Razorpay's API** (265 of 321 ms), the shop lookup 2.6 ms. A planted 2.8 s lock found from **one trace**. Cost: shop CPU ≈39% → ≈53% at 300 req/s (≈49% sampled at 10%) | [E13](docs/experiments/E13-tracing.md) |
+| A login rush (Argon2 on purpose) filled the shop's CPU: at 15 logins/s shoppers' p95 was 6–7 s, with timeouts. And one shared token secret meant a leak anywhere = forge any login | Identity split into its own service; tokens RS256 (only identity holds the private key, everyone else the public key); the customer's email travels in the event | Same rush: shoppers' p95 **14–15 ms, 0 errors** (even with the same total CPU: 0 errors). Identity down 60 s: signed-in shoppers unaffected; an outage test first **lost confirmation emails**, fixed (sent within 0.3 s). Key rotation under traffic: 0 errors | [E14](docs/experiments/E14-identity-service.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -52,6 +53,8 @@ flowchart LR
     GW --> API1[API]
     GW --> API2[API ...]
     GW -- Pay · webhooks --> PAY[Payments service]
+    GW -- "/auth/*" --> ID[Identity service<br/>logins · users · 2FA<br/>signs tokens]
+    ID --> IM[(MySQL<br/>scalecart_identity)]
     PAY -- "order lookup (HTTP)" --> API1
     PAY --> PM[(MySQL<br/>scalecart_payments)]
     PAY <-- "payment.captured /<br/>order.payment_result" --> Q
@@ -63,8 +66,8 @@ flowchart LR
     W --> Q[[RabbitMQ<br/>quorum queues · DLQ]]
     Q --> W
     W --> MP[Mail<br/>Mailpit]
-    P[Prometheus + Grafana] -. scrapes .-> GW & API1 & W & PAY
-    GW & API1 & W & PAY -. traces .-> J[Jaeger<br/>tracing UI]
+    P[Prometheus + Grafana] -. scrapes .-> GW & API1 & W & PAY & ID
+    GW & API1 & W & PAY & ID -. traces .-> J[Jaeger<br/>tracing UI]
 ```
 
 - **One front door:** NGINX serves the shop's files and stops floods; every API request then goes through **Kong**, the
@@ -72,9 +75,10 @@ flowchart LR
   each request an `X-Request-ID`. The services still verify tokens themselves.
 - **Every request can be followed:** OpenTelemetry traces each request through Kong, the services, MySQL, Redis and
   RabbitMQ (the trace rides along in the outbox), shown in **Jaeger**. Responses carry `X-Trace-Id`.
-- **Modular monolith + one service:** identity, catalog, inventory, cart, orders, drops and AI are modules of the shop.
-  Each owns its own MySQL database and talks to the others only through services. **Payments** has been split out as
-  its own service (`apps/payments`, own DB user): one HTTP call to the shop at "Pay", events through RabbitMQ for the rest.
+- **A modular monolith + two services:** catalog, inventory, cart, orders, drops and AI are modules of the shop, each
+  with its own MySQL database. **Payments** (`apps/payments`) and **identity** (`apps/identity`) are separate
+  services with their own database logins. Identity alone signs login tokens (RS256, private key); Kong, the shop and
+  payments only check them with its public keys, so none of them could forge a login.
 - **The API never talks to RabbitMQ.** It writes the order and an "order.created" event in one transaction (the
   outbox). The worker relays the event, sends the emails, marks orders paid when payments says so, and expires unpaid orders
   (after asking payments first).
@@ -101,10 +105,12 @@ Needs Docker Desktop and Node 24 (k6 only for the load tests).
 
 ```powershell
 Copy-Item .env.example .env        # fill in your own secrets; .env is never committed
+node infra/identity/new-signing-key.mjs               # the RSA key that signs login tokens (written into .env)
 cd apps/web; npm install; npm run build; cd ../..     # the shop, served by NGINX at /shop/
-docker compose build api; docker compose build payments   # build one at a time (parallel builds can race)
-docker compose up -d               # mysql, redis, rabbitmq, mailpit, migrations, api, worker, payments, nginx, prometheus, grafana
-docker compose run --rm -e SEED_PRODUCTS=200000 -e SEED_USERS=2000 migrate node dist/seed.js   # demo data
+docker compose build api; docker compose build payments; docker compose build identity   # one at a time (parallel builds race)
+docker compose up -d               # mysql, redis, rabbitmq, mailpit, migrations, api, worker, payments, identity, kong, nginx, …
+docker compose run --rm -e SEED_PRODUCTS=200000 migrate node dist/seed.js         # demo products
+docker compose run --rm -e SEED_USERS=2000 identity-migrate node dist/seed.js     # the admin + load-test users
 ```
 
 Open **http://localhost:8088/shop/**. Log in as:
@@ -132,14 +138,15 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e        # shop: 75 unit, 180 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
-cd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 25 end-to-end
+cd apps/api; npm test; npm run test:e2e        # shop: 69 unit, 140 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
+cd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 29 end-to-end
+cd apps/identity; npm test; npm run test:e2e   # identity service: 16 unit, 26 end-to-end (logins, 2FA, keys, rotation)
 node infra/kong/check-gateway.mjs              # 16 gateway rules against the running stack (tokens, routes, 404s)
 node infra/jaeger/check-tracing.mjs            # a real payment, traced end to end through RabbitMQ (reads Jaeger)
 cd apps/web; npm test                          # 25 component tests with a fake API
 ```
 
-The end-to-end suite runs against real MySQL, Redis and RabbitMQ; the core shop and auth suites run on both
+The end-to-end suite runs against real MySQL, Redis and RabbitMQ; the core shop suites run on both
 Fastify and Express. Key tests are
 **mutation-checked**: I broke the code on purpose and confirmed the test failed.
 
@@ -160,12 +167,13 @@ tests send everything from one IP, so run them with `RATE_LIMIT_ENABLED=false`.
 ```
 apps/api/              NestJS: one folder per module; dist/main.js = API, dist/worker.js = background worker (same image)
 apps/payments/         NestJS: the payments service (Razorpay, its own database and outbox)
+apps/identity/         NestJS: the identity service (logins, users, 2FA; the only holder of the token signing key)
 apps/web/              React + Tailwind storefront and admin area (Vite)
 apps/demo/             the earlier one-page demo (/demo/)
 infra/                 MySQL init, NGINX (edge), Kong (API gateway), Jaeger (tracing), Prometheus, Grafana (dashboards provisioned automatically)
 k8s/                   kind cluster, probes, autoscaler
 load-tests/            k6 scripts and the runner
-docs/experiments/      E0–E13: every experiment with its real numbers
+docs/experiments/      E0–E14: every experiment with its real numbers
 docs/interview-notes/  how to explain each phase: story → proof → fix → trade-off
 ```
 
@@ -173,7 +181,7 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong), distributed tracing (OpenTelemetry + Jaeger) |
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong), distributed tracing (OpenTelemetry + Jaeger), identity as its own service (RS256 tokens) |
 | Next | Other system-design topics (read replicas, CDN, search engine, CQRS…) · cloud load tests |
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

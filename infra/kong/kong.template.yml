@@ -1,6 +1,6 @@
 # Kong API gateway (Phase 9), DB-less: this file is Kong's whole configuration.
-# At container start, __JWT_SECRET__ is replaced with JWT_SECRET from .env (see docker-compose.yml), so the secret is
-# never written into the repository.
+# At container start, start.sh replaces __JWT_CREDENTIALS__ with identity's PUBLIC keys (IDENTITY_PUBLIC_KEYS in .env).
+# Since Phase 11 the gateway holds no secret at all: it can check a token, never create one.
 #
 # Layers:  NGINX (edge: static shop files, flood limit per token, client IP)
 #            → Kong (gateway: token check at the door, routing, request ids, metrics)
@@ -25,11 +25,6 @@ services:
         methods: [GET, HEAD]
         paths: [/products, /inventory, /drops, /health, /docs]
         strip_path: false
-      # Logging in and out. "/auth/login" also covers "/auth/login/2fa".
-      - name: shop-public-auth
-        methods: [POST]
-        paths: [/auth/register, /auth/login, /auth/refresh, /auth/logout]
-        strip_path: false
       # Read-only MCP tools for AI clients, and the lab routes used by experiments (as before the gateway).
       - name: shop-public-other
         paths: [/mcp, /lab]
@@ -43,6 +38,7 @@ services:
           - name: jwt
             config:
               claims_to_verify: [exp]   # refuse expired tokens (not checked by default)
+              key_claim_name: kid       # which public key: the token's key id (read from the payload, then the header)
               uri_param_names: []        # only the Authorization header, never ?jwt= in URLs
               cookie_names: []
       # Never reachable from outside, whatever the token: service-to-service routes, and metrics (Prometheus scrapes
@@ -55,6 +51,35 @@ services:
             config:
               status_code: 404
               message: not found
+
+  # Phase 11: logins and users live in the identity service, which alone signs tokens.
+  - name: identity
+    url: http://identity:3003
+    connect_timeout: 2000
+    read_timeout: 30000
+    retries: 0
+    routes:
+      # Logging in and out. "/auth/login" also covers "/auth/login/2fa". Methods + paths beat the "/auth" route below.
+      - name: identity-public
+        methods: [POST]
+        paths: [/auth/register, /auth/login, /auth/refresh, /auth/logout]
+        strip_path: false
+      # Its public keys: anyone may read them (they can't create tokens).
+      - name: identity-keys
+        methods: [GET]
+        paths: [/.well-known/jwks.json]
+        strip_path: false
+      # /auth/me and the 2FA settings need a valid token.
+      - name: identity-protected
+        paths: [/auth]
+        strip_path: false
+        plugins:
+          - name: jwt
+            config:
+              claims_to_verify: [exp]
+              key_claim_name: kid
+              uri_param_names: []
+              cookie_names: []
 
   # AI chat: one message can take several model calls (up to ~75 s) and the reply is streamed, so this service has a
   # longer read timeout and the route doesn't buffer the response.
@@ -72,6 +97,7 @@ services:
           - name: jwt
             config:
               claims_to_verify: [exp]   # refuse expired tokens (not checked by default)
+              key_claim_name: kid       # which public key: the token's key id (read from the payload, then the header)
               uri_param_names: []        # only the Authorization header, never ?jwt= in URLs
               cookie_names: []
 
@@ -90,6 +116,7 @@ services:
           - name: jwt
             config:
               claims_to_verify: [exp]   # refuse expired tokens (not checked by default)
+              key_claim_name: kid       # which public key: the token's key id (read from the payload, then the header)
               uri_param_names: []        # only the Authorization header, never ?jwt= in URLs
               cookie_names: []
       # Razorpay's webhook and the browser's return from Razorpay Checkout carry no token: they are checked by
@@ -99,15 +126,13 @@ services:
         paths: [/payments/razorpay/webhook, /payments/razorpay/callback]
         strip_path: false
 
-# The one "consumer" is the shop's login system: every access token it issues has iss = "scalecart" and is signed
-# with the shared HS256 secret. Kong checks the signature and the expiry; the services check the rest (audience,
-# role, the 2FA challenge token's own audience).
+# The one "consumer" is the identity service: every access token it issues is RS256, with its key id ("kid") in the
+# header. One credential per accepted key id (during a rotation: the new key and the old one). Kong checks the
+# signature with that public key and the expiry; the services check the rest (audience, role).
 consumers:
   - username: scalecart-users
     jwt_secrets:
-      - key: scalecart
-        algorithm: HS256
-        secret: '__JWT_SECRET__'
+__JWT_CREDENTIALS__
 
 plugins:
   # One id per request: sent to the services (they log it) and echoed to the client, so a support ticket with

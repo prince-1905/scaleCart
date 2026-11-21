@@ -95,8 +95,13 @@ export class OrdersAdminController {
   @Get()
   async list(@Query() query: AdminOrdersQuery) {
     const page = await this.orders.list(query);
-    const emails = await this.users.getEmails(page.items.map((o) => o.userId));
-    return { ...page, items: page.items.map((o) => ({ ...o, email: emails.get(o.userId) ?? null })) };
+    // Emails come from the identity service (Phase 11). If it can't answer, the admin still sees the orders.
+    const emails = await this.users.getEmails(page.items.map((o) => o.userId)).catch(() => null);
+    return {
+      ...page,
+      emailsUnavailable: emails === null,
+      items: page.items.map((o) => ({ ...o, email: emails?.get(o.userId) ?? null })),
+    };
   }
 
   @Get('stats')
@@ -108,6 +113,7 @@ export class OrdersAdminController {
   async get(@Param('id') id: string) {
     const order = UUID_PATTERN.test(id) ? await this.orders.get(id) : null;
     if (!order) throw new NotFoundException('order not found');
-    return { ...order, email: await this.users.getEmail(order.userId) };
+    const email = await this.users.getEmail(order.userId).catch(() => undefined);
+    return { ...order, email: email ?? null, emailsUnavailable: email === undefined };
   }
 }

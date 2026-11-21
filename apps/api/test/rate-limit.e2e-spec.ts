@@ -120,13 +120,7 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('rate limit on %s', (adap
     await http(app).get('/cart').set('Authorization', `Bearer ${user.accessToken}`).expect(200);
   });
 
-  it('login is limited per IP, whatever the email (many accounts from one address)', async () => {
-    const app = await start({ RATE_LIMIT_AUTH: '3:0.01' });
-    const login = (email: string) => http(app).post('/auth/login').send({ email, password: 'wrong-password-123' });
-    for (const email of ['a@x.local', 'b@x.local', 'c@x.local']) await login(email).expect(401);
-    const refused = await login('d@x.local').expect(429);
-    expect(refused.body.error).toBe('rate_limited');
-  });
+  // Login's per-IP limit moved to the identity service (Phase 11): apps/identity/test.
 
   it('never limits health checks or metrics', async () => {
     const app = await start({ RATE_LIMIT_DEFAULT: '1:0.01' });

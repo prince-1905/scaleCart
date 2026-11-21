@@ -1,12 +1,11 @@
 import type { INestApplication } from '@nestjs/common';
-import type { HttpAdapterName } from '../src/config/env.js';
-import { http, registerUser, startApp, unique } from './support.js';
+import { http, registerUser, startIdentity, unique } from './support.js';
 
-describe.each<HttpAdapterName>(['fastify', 'express'])('auth on %s', (adapter) => {
+describe('auth (moved from the shop, Phase 11)', () => {
   let app: INestApplication;
 
   beforeAll(async () => {
-    app = await startApp(adapter);
+    app = await startIdentity();
   });
 
   afterAll(async () => {
@@ -39,7 +38,6 @@ describe.each<HttpAdapterName>(['fastify', 'express'])('auth on %s', (adapter) =
   it('protects routes by default', async () => {
     await http(app).get('/auth/me').expect(401);
     await http(app).get('/auth/me').auth('not-a-jwt', { type: 'bearer' }).expect(401);
-    await http(app).get('/cart').expect(401);
   });
 
   it('gives the same answer for a wrong password and an unknown email', async () => {

@@ -1,46 +1,27 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
-import { CacheModule } from '../cache/cache.module.js';
-import { ENV, type Env } from '../config/env.js';
 import { ObservabilityModule } from '../observability/observability.module.js';
-import { AuthController } from './auth.controller.js';
 import { AuthGuard } from './auth.guard.js';
-import { AuthService } from './auth.service.js';
-import { LoginThrottle } from './login-throttle.js';
-import { PasswordHasher } from './password-hasher.js';
-import { TwoFactorController } from './two-factor.controller.js';
-import { TwoFactorService } from './two-factor.service.js';
+import { JwksKeys } from './jwks-keys.js';
 import { UsersModule } from './users.module.js';
 
+/**
+ * What's left of identity in the shop since Phase 11: CHECKING access tokens. Logging in, users, refresh tokens and
+ * 2FA live in the identity service (apps/identity), which alone can sign tokens. This module:
+ *   - the global AuthGuard (RS256, identity's public keys via JwksKeys)
+ *   - UserDirectory (UsersModule): users' emails, asked from identity over HTTP
+ */
 @Module({
   imports: [
     UsersModule,
     ObservabilityModule,
-    CacheModule,
-    JwtModule.registerAsync({
-      inject: [ENV],
-      useFactory: (env: Env) => ({
-        secret: env.jwtSecret,
-        // Pin the algorithm on both sides: a verifier that trusts the token's own
-        // "alg" header can be tricked (e.g. "alg": "none").
-        signOptions: {
-          algorithm: 'HS256',
-          expiresIn: env.accessTokenTtlSeconds,
-          issuer: 'scalecart',
-          audience: 'scalecart-api',
-        },
-        verifyOptions: { algorithms: ['HS256'], issuer: 'scalecart', audience: 'scalecart-api' },
-      }),
+    // Verify only: no secret, no private key. Algorithm, issuer and audience pinned (never trust the token's "alg").
+    JwtModule.register({
+      verifyOptions: { algorithms: ['RS256'], issuer: 'scalecart', audience: 'scalecart-api' },
     }),
   ],
-  controllers: [AuthController, TwoFactorController],
-  providers: [
-    AuthService,
-    PasswordHasher,
-    LoginThrottle,
-    TwoFactorService,
-    { provide: APP_GUARD, useClass: AuthGuard },
-  ],
+  providers: [JwksKeys, { provide: APP_GUARD, useClass: AuthGuard }],
+  exports: [JwksKeys],
 })
 export class IdentityModule {}

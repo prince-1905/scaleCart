@@ -1,6 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-import { JwtService } from '@nestjs/jwt';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +13,7 @@ import type { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module.js';
 import { loadEnv } from '../src/config/env.js';
 import { RabbitService } from '../src/messaging/rabbit.service.js';
+import { FakeIdentity } from './fake-identity.js';
 import type { PaymentGateway } from '../src/payments/payment-gateway.js';
 import type { ShopOrder } from '../src/shop/shop-client.js';
 
@@ -22,8 +22,10 @@ const DOT_ENV = fileURLToPath(new URL('../../../.env', import.meta.url));
 if (existsSync(DOT_ENV)) process.loadEnvFile(DOT_ENV);
 if (!process.env.DB_PASSWORD) throw new Error('e2e tests need DB_PASSWORD: copy .env.example to .env at the repo root');
 
-export const JWT_SECRET = 'test-only-secret-0123456789abcdefghijklmnop';
 export const SERVICE_TOKEN = 'test-internal-service-token-0123456789abcdef';
+
+/** The identity service's stand-in (Phase 11): serves the public key that checks customers' tokens. */
+export const identity = await new FakeIdentity(SERVICE_TOKEN).start();
 export const WEBHOOK_SECRET = 'test-webhook-secret-0123456789';
 export const KEY_SECRET = 'test-key-secret-0123456789';
 
@@ -40,7 +42,7 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   PAYMENTS_DB_NAME: 'scalecart_test_payments',
   RABBITMQ_URL: `amqp://scalecart:${process.env.RABBITMQ_PASSWORD ?? ''}@127.0.0.1:5672`,
   MQ_PREFIX: 'test-pay.',
-  JWT_SECRET,
+  IDENTITY_URL: identity.url,
   INTERNAL_SERVICE_TOKEN: SERVICE_TOKEN,
   RAZORPAY_KEY_ID: 'rzp_test_e2e',
   RAZORPAY_KEY_SECRET: KEY_SECRET,
@@ -122,11 +124,10 @@ export class FakeShop {
   }
 }
 
-const jwt = new JwtService({ secret: JWT_SECRET });
-/** An access token exactly like the shop issues (same secret, issuer, audience). */
+/** An access token exactly like the identity service issues (RS256, its key id, issuer, audience). */
 export const customerToken = (userId = randomUUID()) => ({
   userId,
-  token: jwt.sign({ sub: userId, role: 'customer' }, { issuer: 'scalecart', audience: 'scalecart-api', expiresIn: 900 }),
+  token: identity.sign({ sub: userId, role: 'customer' }),
 });
 
 export const http = (app: INestApplication) => request(app.getHttpServer());

@@ -19,10 +19,11 @@ export interface PaymentsEnv {
   serviceName: string;
   db: DbConfig;
   /**
-   * Verifies the shop's login tokens (HS256, same secret). Only verifies, never signs. The API-gateway phase moves
-   * token checks to the gateway, and then this service won't need it.
+   * The identity service (Phase 11): its public keys (/.well-known/jwks.json) check customers' access tokens. This
+   * service has no secret or private key: it can check a token, never create one.
    */
-  jwtSecret: string;
+  identityUrl: string;
+  identityTimeoutMs: number;
   rabbitmqUrl: string;
   /** Prefix for exchange and queue names (`test.` in e2e tests). */
   mqPrefix: string;
@@ -69,8 +70,6 @@ export function loadDbConfig(source: NodeJS.ProcessEnv = process.env): DbConfig 
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): PaymentsEnv {
-  const jwtSecret = source.JWT_SECRET ?? '';
-  if (jwtSecret.length < 32) throw new Error('JWT_SECRET must be set (the same as the shop API, at least 32 characters)');
   const serviceToken = source.INTERNAL_SERVICE_TOKEN ?? '';
   if (serviceToken.length < 32) throw new Error('INTERNAL_SERVICE_TOKEN must be set (at least 32 characters)');
 
@@ -80,7 +79,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): PaymentsEnv {
     httpAccessLog: bool(source.HTTP_ACCESS_LOG, true),
     serviceName: source.SERVICE_NAME ?? 'scalecart-payments',
     db: loadDbConfig(source),
-    jwtSecret,
+    identityUrl: (source.IDENTITY_URL ?? 'http://127.0.0.1:3003').replace(/\/$/, ''),
+    identityTimeoutMs: int(source, 'IDENTITY_TIMEOUT_MS', 1_000),
     rabbitmqUrl: source.RABBITMQ_URL ?? 'amqp://scalecart:scalecart@127.0.0.1:5672',
     mqPrefix: source.MQ_PREFIX ?? '',
     razorpayKeyId: source.RAZORPAY_KEY_ID ?? '',

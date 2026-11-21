@@ -1,10 +1,8 @@
 #!/bin/sh
-# Builds Kong's config from the template (filling in JWT_SECRET from the environment), then starts Kong.
-# awk with index/substr copies the secret literally: no characters in it are treated as special.
+# Builds Kong's config from the template (render.sh), then starts Kong.
+#
+# Phase 11: the gateway gets only identity's PUBLIC keys (IDENTITY_PUBLIC_KEYS, written by
+# infra/identity/new-signing-key.mjs). With them Kong can check a token, never create one.
 set -eu
-: "${JWT_SECRET:?JWT_SECRET is required}"
-awk '{
-  while ((i = index($0, "__JWT_SECRET__")) > 0) $0 = substr($0, 1, i - 1) ENVIRON["JWT_SECRET"] substr($0, i + 14)
-  print
-}' /kong/kong.template.yml > /tmp/kong.yml
+sh /kong/render.sh /tmp/kong.yml
 exec /docker-entrypoint.sh kong docker-start

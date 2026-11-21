@@ -9,6 +9,8 @@ export type Role = 'customer' | 'admin';
 export interface AuthUser {
   id: string;
   role: Role;
+  /** From the access token (identity puts it there since Phase 11, E14b); absent in older tokens. */
+  email?: string;
 }
 
 export const IS_PUBLIC = 'auth:isPublic';

@@ -91,7 +91,8 @@ export class CheckoutService {
     this.notifyMode = env.notifyMode;
   }
 
-  async checkout(userId: string, key: string, dto: CheckoutDto): Promise<CheckoutResult> {
+  /** `email`: the customer's address from their access token, carried in the order.created event (E14b). */
+  async checkout(userId: string, key: string, dto: CheckoutDto, email?: string): Promise<CheckoutResult> {
     // The waiting-room pass is left out of the fingerprint: a retry may carry a freshly issued pass.
     const { dropPass: _pass, ...request } = dto;
     const claim = await this.claim(userId, key, sha256(JSON.stringify(request)));
@@ -113,7 +114,7 @@ export class CheckoutService {
 
     let order: OrderView;
     try {
-      order = await this.placeOrder(userId, key, claim.orderId, dto);
+      order = await this.placeOrder(userId, key, claim.orderId, dto, email);
     } catch (err) {
       // Free the key: nothing was sold, so the client may retry with the same key.
       await this.releaseClaim(userId, key).catch((e) =>
@@ -148,6 +149,7 @@ export class CheckoutService {
     key: string,
     orderId: string,
     dto: CheckoutDto,
+    email?: string,
   ): Promise<OrderView> {
     // "Buy now" buys one item on its own: other things in the cart are neither bought nor touched.
     const lines = dto.buyNow
@@ -222,6 +224,8 @@ export class CheckoutService {
             occurredAt: order.createdAt,
             orderId,
             userId,
+            // Event-carried state (E14b): the address travels with the event, so the email doesn't depend on identity.
+            ...(email && { email }),
             totalCents,
             items: items.map(({ productId, name, unitPriceCents, quantity }) => ({
               productId,

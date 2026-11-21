@@ -1,7 +1,7 @@
 // Checks the gateway's rules against the running Compose stack (through NGINX → Kong):
 //   node infra/kong/check-gateway.mjs
 // Secrets come from the repo-root .env and are never printed. Exits 1 if any check fails.
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac, createSign, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -15,11 +15,21 @@ const env = Object.fromEntries(
 const BASE = process.env.BASE_URL ?? 'http://localhost:8088';
 
 const b64url = (v) => Buffer.from(typeof v === 'string' ? v : JSON.stringify(v)).toString('base64url');
-/** An HS256 token like the shop's, with whatever claims and secret we choose. */
-function token(claims, secret = env.JWT_SECRET) {
-  const head = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url(claims)}`;
-  return `${head}.${createHmac('sha256', secret).update(head).digest('base64url')}`;
+// Phase 11: identity signs access tokens with RS256 and its key id. This tool reads identity's private key from .env
+// (it runs on the developer's machine), so it can make tokens with chosen claims, to test what Kong lets through.
+const KID = env.IDENTITY_SIGNING_KEY_ID;
+const IDENTITY_KEY = Buffer.from(env.IDENTITY_SIGNING_KEY ?? '', 'base64').toString();
+/** An RS256 token signed with `privateKey` (identity's by default). */
+function token(claims, { privateKey = IDENTITY_KEY, kid = KID } = {}) {
+  const head = `${b64url({ alg: 'RS256', typ: 'JWT', kid })}.${b64url(claims)}`;
+  return `${head}.${createSign('RSA-SHA256').update(head).sign(privateKey).toString('base64url')}`;
 }
+/** The pre-Phase-11 kind: HS256 with the shared JWT_SECRET. That secret must no longer be able to mint a login. */
+function sharedSecretToken(claims) {
+  const head = `${b64url({ alg: 'HS256', typ: 'JWT', kid: KID })}.${b64url(claims)}`;
+  return `${head}.${createHmac('sha256', env.JWT_SECRET).update(head).digest('base64url')}`;
+}
+const strangerKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
 const now = Math.floor(Date.now() / 1000);
 
 async function req(method, path, { auth, headers = {}, body } = {}) {
@@ -59,19 +69,25 @@ check('every response gets an X-Request-ID', /^[0-9a-f-]{36}$/.test(rid ?? ''), 
 r = await req('GET', '/cart');
 check('no token on a protected route → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
 
-r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'scalecart', aud: 'scalecart-api', exp: now + 600 }, 'not-the-secret-not-the-secret-123') });
-check('forged signature → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
+r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'scalecart', aud: 'scalecart-api', exp: now + 600 }, { privateKey: strangerKey }) });
+check('signed with another key (but our key id) → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
+
+r = await req('GET', '/cart', { auth: sharedSecretToken({ sub: 'x', role: 'admin', iss: 'scalecart', aud: 'scalecart-api', exp: now + 600 }) });
+check('the old shared secret (HS256) can no longer mint a login → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
 
 r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'scalecart', aud: 'scalecart-api', exp: now - 60 }) });
 check('expired token → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
 
-r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'someone-else', exp: now + 600 }) });
-check('unknown issuer → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
+r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'scalecart', aud: 'scalecart-api', exp: now + 600 }, { kid: 'no-such-key' }) });
+check('unknown key id → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
+
+r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'someone-else', aud: 'scalecart-api', exp: now + 600 }) });
+check('wrong issuer → passes Kong (it checks key and expiry), refused by the shop', r.status === 401 && !fromKong(r), `${r.status} ${r.text}`);
 
 r = await req('GET', '/cart', { auth: good });
 check('valid token → reaches the shop (200)', r.status === 200, `${r.status} ${r.text.slice(0, 80)}`);
 
-// Right secret and issuer, wrong audience (like the 2FA challenge token): Kong lets it through, the shop refuses it.
+// Right key and issuer, wrong audience (like the 2FA challenge token): Kong lets it through, the shop refuses it.
 r = await req('GET', '/cart', { auth: token({ sub: 'x', iss: 'scalecart', aud: 'scalecart-2fa', exp: now + 300 }) });
 check('wrong audience → passes Kong, refused by the shop (defense in depth)', r.status === 401 && !fromKong(r), `${r.status} ${r.text}`);
 
@@ -93,6 +109,16 @@ check('admin route with a customer token → passes Kong, the shop refuses (403)
 
 r = await req('GET', '/drops');
 check('drop list is public', r.status === 200, r.status);
+
+// Phase 11: logins and users are the identity service's.
+r = await req('GET', '/auth/me');
+check('/auth/me without a token → 401 at the gateway', r.status === 401 && fromKong(r), `${r.status} ${r.text}`);
+r = await req('GET', '/auth/me', { auth: good });
+check('/auth/me with a token → answered by identity', r.status === 200 && JSON.parse(r.text).email === 'loadtest+7@scalecart.local', `${r.status} ${r.text.slice(0, 80)}`);
+r = await req('GET', '/.well-known/jwks.json');
+check('the public key set is public, and has our key id', r.status === 200 && JSON.parse(r.text).keys?.some((k) => k.kid === KID), r.status);
+r = await req('GET', `/internal/users?ids=${randomUUID()}`, { headers: { 'x-service-token': 'guess' } });
+check("identity's internal email lookup → 404 at the gateway", r.status === 404 && fromKong(r), `${r.status} ${r.text}`);
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall checks passed');
 process.exit(failed ? 1 : 0);

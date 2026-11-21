@@ -11,6 +11,11 @@ export interface OrderCreatedEvent {
   occurredAt: string;
   orderId: string;
   userId: string;
+  /**
+   * The customer's address, copied from their access token at checkout (since E14b). Optional: older events don't
+   * have it, and then the consumer asks the identity service.
+   */
+  email?: string;
   totalCents: number;
   items: { productId: number; name: string; unitPriceCents: number; quantity: number }[];
 }

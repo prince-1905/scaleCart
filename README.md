@@ -7,7 +7,7 @@ Every number below links to the experiment that produced it.
 
 ![The ScaleCart storefront](docs/images/shop-home.png)
 
-**Stack:** Node.js 24 · TypeScript · NestJS 12 (Fastify) · MySQL 8.4 + TypeORM · Redis · RabbitMQ · React 19 + Tailwind 4 ·
+**Stack:** Node.js 24 · TypeScript · NestJS 12 (Fastify) · MySQL 8.4 + TypeORM · Redis · RabbitMQ · OpenSearch · React 19 + Tailwind 4 ·
 Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometheus + Grafana · k6
 
 ---
@@ -33,6 +33,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | Every fake login token cost the shop CPU: a flood of 1,000/s, each token different, slips past per-token limits | Kong API gateway in front of the services: token check at the door, routing, request IDs | Shop CPU under the flood **15–16% vs 50–52%** (no attack: 14–17%), shoppers' p95 **9–16 ms vs 23–36 ms**. Cost: ~1 ms per request. Found: NGINX's default health check kept customers out **13 s** after Kong was back (fixed: ~0.2 s) | [E12](docs/experiments/E12-api-gateway.md) |
 | "Pay is slow" — but where? Metrics can't say, and one payment touches 3 services and 2 queue hops | Distributed tracing: OpenTelemetry in every service, Kong starts the trace, the outbox carries it through RabbitMQ, Jaeger shows it | Over 20 Pays: **79% of the time is Razorpay's API** (265 of 321 ms), the shop lookup 2.6 ms. A planted 2.8 s lock found from **one trace**. Cost: shop CPU ≈39% → ≈53% at 300 req/s (≈49% sampled at 10%) | [E13](docs/experiments/E13-tracing.md) |
 | A login rush (Argon2 on purpose) filled the shop's CPU: at 15 logins/s shoppers' p95 was 6–7 s, with timeouts. And one shared token secret meant a leak anywhere = forge any login | Identity split into its own service; tokens RS256 (only identity holds the private key, everyone else the public key); the customer's email travels in the event | Same rush: shoppers' p95 **14–15 ms, 0 errors** (even with the same total CPU: 0 errors). Identity down 60 s: signed-in shoppers unaffected; an outage test first **lost confirmation emails**, fixed (sent within 0.3 s). Key rotation under traffic: 0 errors | [E14](docs/experiments/E14-identity-service.md) |
+| Search on MySQL FULLTEXT: a typo = an empty page, and 50 searches/s used more than a whole MySQL core (the one checkout needs) | OpenSearch as a read copy (CQRS), kept in sync by outbox events; MySQL as the backup behind a circuit breaker and a bulkhead | Test queries found **20/20 vs 9/20** (typos 9/9 vs 0/9); MySQL CPU at 50 searches/s **~4.5% vs 100–124%**; an edit is searchable after **p50 0.8 s**. Failure tests found 3 bugs: the backup overloaded MySQL, the breaker re-opened itself 2,362×, a stopped OpenSearch broke the **cart** via slow DNS lookups (fixed: 0 failures) | [E15](docs/experiments/E15-search-cqrs.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -61,6 +62,8 @@ flowchart LR
     PAY --> RZ
     API1 & API2 --> R[(Redis<br/>cache · waiting room<br/>stock gate · login limits)]
     API1 & API2 --> M[(MySQL<br/>one database per module)]
+    API1 & API2 -- search --> OS[(OpenSearch<br/>search copy of products)]
+    W -- "product.changed" --> OS
     API1 & API2 -. order + event<br/>in one transaction .-> M
     W[Worker<br/>outbox relay · jobs] --> M
     W --> Q[[RabbitMQ<br/>quorum queues · DLQ]]
@@ -82,6 +85,9 @@ flowchart LR
 - **The API never talks to RabbitMQ.** It writes the order and an "order.created" event in one transaction (the
   outbox). The worker relays the event, sends the emails, marks orders paid when payments says so, and expires unpaid orders
   (after asking payments first).
+- **Search reads a copy (CQRS).** MySQL holds the products; OpenSearch holds a search-friendly copy (typos forgiven,
+  ranked, facets), updated from `product.changed` events through the outbox. If OpenSearch is down, MySQL answers,
+  a few at a time.
 - **Money paths always read MySQL.** Redis only speeds things up (cache, queue tickets, the stock gate). If Redis goes
   down, drops pause but can never oversell.
 
@@ -108,8 +114,9 @@ Copy-Item .env.example .env        # fill in your own secrets; .env is never com
 node infra/identity/new-signing-key.mjs               # the RSA key that signs login tokens (written into .env)
 cd apps/web; npm install; npm run build; cd ../..     # the shop, served by NGINX at /shop/
 docker compose build api; docker compose build payments; docker compose build identity   # one at a time (parallel builds race)
-docker compose up -d               # mysql, redis, rabbitmq, mailpit, migrations, api, worker, payments, identity, kong, nginx, …
+docker compose up -d               # mysql, redis, rabbitmq, mailpit, opensearch, migrations, api, worker, payments, identity, kong, nginx, …
 docker compose run --rm -e SEED_PRODUCTS=200000 migrate node dist/seed.js         # demo products
+docker compose run --rm migrate node dist/reindex.js                              # copy them into OpenSearch (search)
 docker compose run --rm -e SEED_USERS=2000 identity-migrate node dist/seed.js     # the admin + load-test users
 ```
 
@@ -129,6 +136,7 @@ Optional in `.env`:
 | http://localhost:3001 | Grafana dashboard |
 | http://localhost:9090 | Prometheus |
 | http://localhost:16686 | Jaeger: traces (paste a response's `X-Trace-Id`) |
+| http://localhost:9200 | OpenSearch (the search copy; e.g. `/products/_count`) |
 | http://localhost:8025 | Mailpit: every email the shop sends |
 | http://localhost:15672 | RabbitMQ management (`scalecart` / `RABBITMQ_PASSWORD`) |
 
@@ -138,8 +146,8 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e        # shop: 69 unit, 140 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit)
-cd apps/payments; npm test; npm run test:e2e   # payments service: 16 unit, 29 end-to-end
+cd apps/api; npm test; npm run test:e2e        # shop: 77 unit, 147 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit opensearch)
+cd apps/payments; npm test; npm run test:e2e   # payments service: 18 unit, 29 end-to-end
 cd apps/identity; npm test; npm run test:e2e   # identity service: 16 unit, 26 end-to-end (logins, 2FA, keys, rotation)
 node infra/kong/check-gateway.mjs              # 16 gateway rules against the running stack (tokens, routes, 404s)
 node infra/jaeger/check-tracing.mjs            # a real payment, traced end to end through RabbitMQ (reads Jaeger)
@@ -159,7 +167,7 @@ Fastify and Express. Key tests are
 
 `run.ps1` prints a per-step table and checks that k6 itself wasn't the bottleneck. Switches for the experiments include
 `STOCK_RESERVATION=atomic|locking|naive`, `HTTP_ADAPTER=fastify|express`, `NOTIFY_MODE=outbox|sync`, `CACHE_ENABLED`,
-`DROP_STOCK_GATE`, `RATE_LIMIT_ENABLED`, `API_REPLICAS` and `API_CPUS`. The rate limiter is on by default; older load
+`DROP_STOCK_GATE`, `RATE_LIMIT_ENABLED`, `SEARCH_ENGINE=opensearch|mysql`, `API_REPLICAS` and `API_CPUS`. The rate limiter is on by default; older load
 tests send everything from one IP, so run them with `RATE_LIMIT_ENABLED=false`.
 
 ## Repository layout
@@ -173,7 +181,7 @@ apps/demo/             the earlier one-page demo (/demo/)
 infra/                 MySQL init, NGINX (edge), Kong (API gateway), Jaeger (tracing), Prometheus, Grafana (dashboards provisioned automatically)
 k8s/                   kind cluster, probes, autoscaler
 load-tests/            k6 scripts and the runner
-docs/experiments/      E0–E14: every experiment with its real numbers
+docs/experiments/      E0–E15: every experiment with its real numbers
 docs/interview-notes/  how to explain each phase: story → proof → fix → trade-off
 ```
 
@@ -181,7 +189,7 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong), distributed tracing (OpenTelemetry + Jaeger), identity as its own service (RS256 tokens) |
-| Next | Other system-design topics (read replicas, CDN, search engine, CQRS…) · cloud load tests |
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong), distributed tracing (OpenTelemetry + Jaeger), identity as its own service (RS256 tokens), search engine + CQRS (OpenSearch) |
+| Next | Other system-design topics (read replicas, CDN…) · cloud load tests |
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

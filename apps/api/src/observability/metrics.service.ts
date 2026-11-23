@@ -156,6 +156,30 @@ export class MetricsService {
   });
 
   /** Calls from the shop to the payments service: ok, error, open (refused by the circuit breaker). */
+  /** Product searches by who answered (Phase 12): opensearch, mysql (chosen), mysql-fallback (OpenSearch failed). */
+  readonly searches = new Counter({
+    name: 'product_searches_total',
+    help: 'Product searches by the engine that answered them.',
+    labelNames: ['source'] as const,
+    registers: [this.registry],
+  });
+
+  /** Search index updates by the worker's indexer (Phase 12): indexed, removed, retried, dead_lettered. */
+  readonly searchIndexing = new Counter({
+    name: 'search_index_updates_total',
+    help: 'Product changes applied to the search index, by result.',
+    labelNames: ['result'] as const,
+    registers: [this.registry],
+  });
+
+  /** From "product saved in MySQL" (the outbox row) to "searchable in OpenSearch": how far the copy lags. */
+  readonly searchIndexLag = new Histogram({
+    name: 'search_index_lag_seconds',
+    help: 'Time from a product change (outbox event) to its update in the search index.',
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60],
+    registers: [this.registry],
+  });
+
   /** Calls to the identity service (Phase 11): users' emails. ok, error (after the retry), timeout, open (breaker). */
   readonly identityCalls = new Counter({
     name: 'identity_service_calls_total',

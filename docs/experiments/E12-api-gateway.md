@@ -113,6 +113,11 @@ Same traffic (100 req/s + the start page).
 - Our compose setup builds the config at start, so a config change in the repo still needs a restart today. The admin
   API (`infra/kong/reload.lua`, inside the container only) is how you'd change it live.
 
+> **Caveat found later (E15f, 2026-11-21):** `e12-gateway-ops.mjs` ran docker with a blocking `execSync`, so the
+> traffic generator sent nothing while a docker command ran and then fired the missed requests at once. Error counts
+> and "served again after" times in E12c/E12d are therefore approximate (the failure kinds and the max_fails fix stand).
+> The script is async now; E12c/E12d were not rerun.
+
 ---
 
 ## Tests

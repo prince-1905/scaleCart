@@ -43,19 +43,30 @@ export class OutboxRelay implements OnApplicationBootstrap, OnApplicationShutdow
   private running = false;
   private loop?: Promise<void>;
 
+  /** Every outbox this relay empties: orders (order.created, order.payment_result) and, since Phase 12, catalog. */
+  private readonly sources: { name: string; db: DataSource }[];
+
   constructor(
-    @InjectDataSource('orders') private readonly db: DataSource,
+    @InjectDataSource('orders') ordersDb: DataSource,
+    @InjectDataSource('catalog') catalogDb: DataSource,
     private readonly rabbit: RabbitService,
     private readonly metrics: MetricsService,
   ) {
-    const ordersDb = this.db;
+    this.sources = [
+      { name: 'orders', db: ordersDb },
+      { name: 'catalog', db: catalogDb },
+    ];
+    const sources = this.sources;
     new Gauge({
       name: 'outbox_pending_events',
-      help: 'Outbox events not yet published to RabbitMQ (backlog).',
+      help: 'Outbox events not yet published to RabbitMQ (backlog), per outbox.',
+      labelNames: ['source'] as const,
       registers: [metrics.registry],
       async collect() {
-        const [row] = await ordersDb.query('SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL');
-        this.set(Number(row.n));
+        for (const s of sources) {
+          const [row] = await s.db.query('SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL');
+          this.set({ source: s.name }, Number(row.n));
+        }
       },
     });
   }
@@ -71,10 +82,16 @@ export class OutboxRelay implements OnApplicationBootstrap, OnApplicationShutdow
     await this.loop;
   }
 
-  /** Publishes one batch. Returns how many events were published. */
+  /** Publishes one batch from each outbox. Returns how many events were published in total. */
   async publishBatch(): Promise<number> {
+    let total = 0;
+    for (const source of this.sources) total += await this.publishFrom(source.db);
+    return total;
+  }
+
+  private async publishFrom(db: DataSource): Promise<number> {
     if (!this.rabbit.isReady) return 0;
-    return this.db.transaction(async (m) => {
+    return db.transaction(async (m) => {
       const rows: OutboxRow[] = await m.query(
         `SELECT id, event_type AS eventType, payload, trace_parent AS traceParent, created_at AS createdAt
            FROM outbox WHERE published_at IS NULL
@@ -91,6 +108,8 @@ export class OutboxRelay implements OnApplicationBootstrap, OnApplicationShutdow
             messageId: row.id,
             type: row.eventType,
             timestamp: Math.floor(new Date(row.createdAt).getTime() / 1000),
+            // Milliseconds (AMQP timestamps are whole seconds): the search indexer measures its lag with it.
+            headers: { 'x-created-ms': new Date(row.createdAt).getTime() },
           }),
         );
       }

@@ -22,6 +22,8 @@ export type StockReservationStrategy = 'atomic' | 'locking' | 'naive';
  *   sync    checkout sends the email itself before answering (lab only, for experiment E3)
  */
 export type NotifyMode = 'outbox' | 'sync';
+/** Where product search runs (Phase 12): the OpenSearch copy (default), or MySQL FULLTEXT (experiment E15, fallback). */
+export type SearchEngine = 'opensearch' | 'mysql';
 
 import type { RateLimitPolicy } from '../rate-limit/rate-limit.js';
 import type { BucketSize } from '../rate-limit/token-bucket.js';
@@ -60,6 +62,17 @@ export interface Env {
   /** The identity service inside the network (Phase 11): its public keys (JWKS) and users' emails. */
   identityUrl: string;
   identityTimeoutMs: number;
+  /**
+   * Phase 12: product search reads a copy of the catalog in OpenSearch (the CQRS read model), kept in sync by
+   * product.changed events. MySQL stays the truth; when OpenSearch can't answer, search falls back to MySQL.
+   */
+  searchEngine: SearchEngine;
+  openSearchUrl: string;
+  /** The alias searches go to; a re-index builds a new index behind it and switches the alias (no downtime). */
+  searchIndex: string;
+  searchTimeoutMs: number;
+  /** At most this many searches fall back to MySQL at the same time (a bulkhead, E15b); the rest get 503. */
+  searchFallbackConcurrency: number;
   stockReservation: StockReservationStrategy;
   /**
    * Size of the kernel queue for connections not yet accepted by Node. Node's default
@@ -184,6 +197,12 @@ export function loadEnv(
   }
 
   const labEndpoints = bool(source.LAB_ENDPOINTS, false);
+  const searchEngine = (source.SEARCH_ENGINE ?? 'opensearch').toLowerCase();
+  if (searchEngine !== 'opensearch' && searchEngine !== 'mysql') {
+    throw new Error(`Invalid SEARCH_ENGINE: ${source.SEARCH_ENGINE} (expected opensearch|mysql)`);
+  }
+  const searchIndex = source.SEARCH_INDEX ?? 'products';
+  if (!/^[a-z0-9_-]+$/.test(searchIndex)) throw new Error(`Invalid SEARCH_INDEX: ${searchIndex}`);
   const notifyMode = (source.NOTIFY_MODE ?? 'outbox').toLowerCase();
   if (notifyMode !== 'outbox' && notifyMode !== 'sync') {
     throw new Error(`Invalid NOTIFY_MODE: ${source.NOTIFY_MODE} (expected outbox|sync)`);
@@ -219,6 +238,11 @@ export function loadEnv(
     jwtSecret,
     identityUrl: (source.IDENTITY_URL ?? 'http://127.0.0.1:3003').replace(/\/$/, ''),
     identityTimeoutMs: positiveInt(source, 'IDENTITY_TIMEOUT_MS', 1_000),
+    searchEngine,
+    openSearchUrl: (source.OPENSEARCH_URL ?? 'http://127.0.0.1:9200').replace(/\/+$/, ''),
+    searchIndex,
+    searchTimeoutMs: positiveInt(source, 'SEARCH_TIMEOUT_MS', 1_000),
+    searchFallbackConcurrency: positiveInt(source, 'SEARCH_FALLBACK_CONCURRENCY', 4),
     stockReservation,
     listenBacklog: positiveInt(source, 'HTTP_LISTEN_BACKLOG', 4096),
     redisUrl: source.REDIS_URL ?? 'redis://127.0.0.1:6379',

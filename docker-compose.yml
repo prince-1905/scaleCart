@@ -25,9 +25,18 @@ services:
       # Phase 8: the payments service's own login (created by infra/mysql/init/02-payments-user.sh).
       IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?set IDENTITY_DB_PASSWORD in .env (see .env.example)}
       PAYMENTS_DB_PASSWORD: ${PAYMENTS_DB_PASSWORD:?set PAYMENTS_DB_PASSWORD in .env (see .env.example)}
+      # Phase 13: the read replica's login (infra/mysql/init/04-replication-user.sh).
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?set REPLICATION_PASSWORD in .env (see .env.example)}
     command:
       # Keep the whole working set in memory, so experiments measure queries, not disk.
       - --innodb-buffer-pool-size=512M
+      # Phase 13: primary of the read replica. GTIDs = an id per transaction, so the replica knows exactly what it
+      # has; the clone plugin gives the replica its first full copy. Binary logs kept 1 day (default 30).
+      - --server-id=1
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-expire-logs-seconds=86400
+      - --plugin-load-add=mysql_clone.so
     ports:
       # 3306 is often taken by a locally installed MySQL.
       - "${MYSQL_PORT:-3307}:3306"
@@ -45,6 +54,53 @@ services:
       timeout: 3s
       retries: 30
       start_period: 20s
+
+  # Phase 13: read replica. A read-only copy of `mysql` that follows its binary log (async, GTID-based). Browsing
+  # reads may go here; writes and money reads never do. Set up by `replica-setup` (clone + replication + read-only).
+  mysql-replica:
+    image: mysql:8.4.13
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env (see .env.example)}
+    command:
+      - --innodb-buffer-pool-size=512M
+      - --server-id=2
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --plugin-load-add=mysql_clone.so
+      # Rebuild the relay log from the primary after a crash instead of trusting a half-written one.
+      - --relay-log-recovery=ON
+    ports:
+      - "127.0.0.1:${MYSQL_REPLICA_PORT:-3308}:3306"
+    volumes:
+      - mysql-replica-data:/var/lib/mysql
+    # The clone ends with the server shutting itself down; Docker starts it again.
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  # One-shot, idempotent: clone the primary into an empty replica, start replication, make it read-only.
+  replica-setup:
+    image: mysql:8.4.13
+    entrypoint: ["bash", "/setup/setup-replica.sh"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env (see .env.example)}
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:?set REPLICATION_PASSWORD in .env (see .env.example)}
+    volumes:
+      - ./infra/mysql/replica:/setup:ro
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mysql-replica:
+        condition: service_healthy
 
   # Cache + login-failure counters. Pure memory: losing it only costs extra MySQL reads.
   redis:
@@ -189,6 +245,16 @@ services:
     image: scalecart/api:dev
     environment:
       <<: *db-env
+      # Phase 13: browsing reads (product lists, order history, admin dashboard, search fallback) may use the read
+      # replica; writes and money reads never do. READ_REPLICA=off sends everything to the primary (E16).
+      DB_READ_HOST: mysql-replica
+      DB_READ_PORT: 3306
+      READ_REPLICA: ${READ_REPLICA:-on}
+      READ_REPLICA_MAX_LAG_SECONDS: ${READ_REPLICA_MAX_LAG_SECONDS:-2}
+      # Replica down or behind: at most this many of its reads at once on the primary, the rest a quick 503 (E16a).
+      READ_FALLBACK_CONCURRENCY: ${READ_FALLBACK_CONCURRENCY:-4}
+      # off = a customer's own order reads use the replica blindly (only to measure the stale-read bug, E16c).
+      READ_YOUR_WRITES: ${READ_YOUR_WRITES:-on}
       PORT: 3000
       HTTP_ADAPTER: ${HTTP_ADAPTER:-fastify}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -550,6 +616,7 @@ services:
 volumes:
   opensearch-data:
   mysql-data:
+  mysql-replica-data:
   rabbitmq-data:
   prometheus-data:
   grafana-data:

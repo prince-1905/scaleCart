@@ -180,6 +180,34 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  // Phase 13: read replica.
+  readonly replicaLag = new Gauge({
+    name: 'mysql_replica_lag_seconds',
+    help: 'How far behind the primary the read replica is (heartbeat age, checked every second).',
+    registers: [this.registry],
+  });
+
+  readonly replicaState = new Gauge({
+    name: 'mysql_replica_state',
+    help: '1 for the read replica\'s current state: off, starting, ok, lagging (too far behind), down.',
+    labelNames: ['state'] as const,
+    registers: [this.registry],
+  });
+
+  readonly dbReads = new Counter({
+    name: 'db_routed_reads_total',
+    help: 'Reads that could use the replica, by where they went and why.',
+    labelNames: ['module', 'target', 'reason'] as const,
+    registers: [this.registry],
+  });
+
+  readonly readYourWritesWait = new Histogram({
+    name: 'replica_read_your_writes_wait_seconds',
+    help: "Time spent waiting for the replica to have a customer's own recent write.",
+    buckets: [0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1],
+    registers: [this.registry],
+  });
+
   /** Calls to the identity service (Phase 11): users' emails. ok, error (after the retry), timeout, open (breaker). */
   readonly identityCalls = new Counter({
     name: 'identity_service_calls_total',

@@ -4,11 +4,12 @@ import { OrdersInit1793059200000 } from './migrations/1793059200000-orders-init.
 import { Outbox1793145600000 } from './migrations/1793145600000-outbox.js';
 import { OrderPayment1793318400000 } from './migrations/1793318400000-order-payment.js';
 import { OutboxTrace1795100000000 } from './migrations/1795100000000-outbox-trace.js';
+import { ReplicationHeartbeat1795400000000 } from './migrations/1795400000000-replication-heartbeat.js';
 import { Order, OrderItem } from './order.entity.js';
 import { OutboxEvent } from './outbox.entity.js';
 
 export const ordersDatabase: ModuleDatabase = {
   module: 'orders',
   entities: [Order, OrderItem, IdempotencyKey, OutboxEvent],
-  migrations: [OrdersInit1793059200000, Outbox1793145600000, OrderPayment1793318400000, OutboxTrace1795100000000],
+  migrations: [OrdersInit1793059200000, Outbox1793145600000, OrderPayment1793318400000, OutboxTrace1795100000000, ReplicationHeartbeat1795400000000],
 };

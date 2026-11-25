@@ -46,7 +46,8 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   DB_PASSWORD: process.env.DB_PASSWORD,
   DB_PREFIX: 'scalecart_test_',
   // Redis database 1, so tests never touch the app's cache (database 0).
-  REDIS_URL: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/1',
+  // REDIS_PORT (.env) = the Compose Redis's host port, when 6379 is taken by something else on the machine.
+  REDIS_URL: process.env.REDIS_URL ?? `redis://127.0.0.1:${process.env.REDIS_PORT ?? '6379'}/1`,
   // Own exchange and queues ("test." prefix), so the dev stack's worker never takes test messages.
   RABBITMQ_URL: `amqp://scalecart:${process.env.RABBITMQ_PASSWORD ?? ''}@127.0.0.1:5672`,
   MQ_PREFIX: 'test.',

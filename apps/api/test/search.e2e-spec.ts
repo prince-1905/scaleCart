@@ -9,6 +9,9 @@ import { createProduct, dataSource, eventually, http, registerAdmin, startApp, s
  * Needs OpenSearch on 127.0.0.1:9200 (docker compose up -d opensearch). Index: test-products (fresh every run).
  * Every test uses its own made-up word, so tests and processes sharing the index don't see each other's products.
  */
+/** These tests check what search finds, not how fast: a busy OpenSearch during a full parallel run took > 1 s. */
+const SLOW_OK = '5000';
+
 describe('product search in OpenSearch (Phase 12)', () => {
   let api: INestApplication;
   let worker: INestApplication;
@@ -18,7 +21,7 @@ describe('product search in OpenSearch (Phase 12)', () => {
   beforeAll(async () => {
     worker = await startWorker();
     await worker.get(ProductSearchIndex).ensureIndex();
-    api = await startApp('fastify', { SEARCH_ENGINE: 'opensearch', LAB_ENDPOINTS: 'true' });
+    api = await startApp('fastify', { SEARCH_ENGINE: 'opensearch', LAB_ENDPOINTS: 'true', SEARCH_TIMEOUT_MS: SLOW_OK });
     admin = await registerAdmin(api);
   });
   afterAll(async () => {
@@ -57,7 +60,7 @@ describe('product search in OpenSearch (Phase 12)', () => {
     const id = await createProduct(api, admin, { name: `Draft ${w}` }); // no category = not listed
     await eventually(async () => (await found(w, '&scope=all')).includes(id));
     expect(await found(w)).not.toContain(id);
-    const shop = await startApp('fastify', { SEARCH_ENGINE: 'opensearch' }); // LAB_ENDPOINTS off
+    const shop = await startApp('fastify', { SEARCH_ENGINE: 'opensearch', SEARCH_TIMEOUT_MS: SLOW_OK }); // LAB_ENDPOINTS off
     try {
       await http(shop).get(`/products/search?q=${w}&scope=all`).expect(400);
     } finally {

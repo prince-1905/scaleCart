@@ -8,6 +8,7 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
+import { ReadReplica } from '../database/read-replica.js';
 import { createHash } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { CartService } from '../cart/cart.service.js';
@@ -86,6 +87,7 @@ export class CheckoutService {
     private readonly users: UserDirectory,
     private readonly mailer: MailerService,
     private readonly drops: DropsService,
+    private readonly reads: ReadReplica,
     @Inject(ENV) env: Env,
   ) {
     this.notifyMode = env.notifyMode;
@@ -134,6 +136,10 @@ export class CheckoutService {
     }
 
     this.count('created');
+    // Phase 13: "My orders" must show this order at once, even if the read replica is a moment behind.
+    await this.reads
+      .rememberWrite(userId, this.db)
+      .catch((err) => this.logger.warn({ err, userId }, 'could not remember the write for read-your-writes'));
     // After the order is safe. If this fails, a leftover cart line is harmless.
     // "Buy now" never came from the cart, so the cart stays exactly as it was.
     if (!dto.buyNow) {

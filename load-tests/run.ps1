@@ -40,7 +40,7 @@ $loadgen = Join-Path $results "$runId.loadgen.json"
 $dotEnv = Join-Path (Split-Path $here -Parent) '.env'
 if (Test-Path $dotEnv) {
   foreach ($line in Get-Content $dotEnv) {
-    if ($line -match '^\s*(ADMIN_PASSWORD|SEED_USER_PASSWORD)\s*=\s*(.*?)\s*$') {
+    if ($line -match '^\s*(ADMIN_PASSWORD|LAB_ADMIN_PASSWORD|SEED_USER_PASSWORD)\s*=\s*(.*?)\s*$') {
       Set-Item "Env:$($Matches[1])" $Matches[2]
     }
   }

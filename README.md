@@ -35,6 +35,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | A login rush (Argon2 on purpose) filled the shop's CPU: at 15 logins/s shoppers' p95 was 6–7 s, with timeouts. And one shared token secret meant a leak anywhere = forge any login | Identity split into its own service; tokens RS256 (only identity holds the private key, everyone else the public key); the customer's email travels in the event | Same rush: shoppers' p95 **14–15 ms, 0 errors** (even with the same total CPU: 0 errors). Identity down 60 s: signed-in shoppers unaffected; an outage test first **lost confirmation emails**, fixed (sent within 0.3 s). Key rotation under traffic: 0 errors | [E14](docs/experiments/E14-identity-service.md) |
 | Search on MySQL FULLTEXT: a typo = an empty page, and 50 searches/s used more than a whole MySQL core (the one checkout needs) | OpenSearch as a read copy (CQRS), kept in sync by outbox events; MySQL as the backup behind a circuit breaker and a bulkhead | Test queries found **20/20 vs 9/20** (typos 9/9 vs 0/9); MySQL CPU at 50 searches/s **~4.5% vs 100–124%**; an edit is searchable after **p50 0.8 s**. Failure tests found 3 bugs: the backup overloaded MySQL, the breaker re-opened itself 2,362×, a stopped OpenSearch broke the **cart** via slow DNS lookups (fixed: 0 failures) | [E15](docs/experiments/E15-search-cqrs.md) |
 | One MySQL served checkout AND every browsing read, incl. a dashboard that scans all orders | A read replica (async, GTID) for reads that may be a moment old; read-your-writes with `WAIT_FOR_EXECUTED_GTID_SET`; lag guard + bulkhead | Primary CPU **82–84% → 19–27%** at a moderate load. Without read-your-writes **18–76 of 100** customers didn't see the order they had just placed; with it **0 of 194** (0.8 ms extra). Found: an overloaded replica looked "down" and flooded the primary (checkout p50 22–30 s); with the bulkhead **0.6–0.7 s** | [E16](docs/experiments/E16-read-replica.md) |
+| The same order event delivered 10 times at once sent up to 10 confirmation emails: the worker checked "already sent?", sent, then recorded | Claim before sending: one INSERT (event id = primary key) decides who sends; losers skip or retry; stale claims are taken over | Redelivery storm: **196 and 169 emails → 20** for 20 orders (×2), **50 for 50** with 20 copies each | [E17](docs/experiments/E17-email-duplicates.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -152,7 +153,7 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e        # shop: 77 unit, 152 end-to-end (needs: docker compose up -d mysql mysql-replica redis rabbitmq mailpit opensearch)
+cd apps/api; npm test; npm run test:e2e        # shop: 77 unit, 155 end-to-end (needs: docker compose up -d mysql mysql-replica redis rabbitmq mailpit opensearch)
 cd apps/payments; npm test; npm run test:e2e   # payments service: 18 unit, 29 end-to-end
 cd apps/identity; npm test; npm run test:e2e   # identity service: 16 unit, 26 end-to-end (logins, 2FA, keys, rotation)
 node infra/kong/check-gateway.mjs              # 16 gateway rules against the running stack (tokens, routes, 404s)
@@ -187,7 +188,7 @@ apps/demo/             the earlier one-page demo (/demo/)
 infra/                 MySQL init, NGINX (edge), Kong (API gateway), Jaeger (tracing), Prometheus, Grafana (dashboards provisioned automatically)
 k8s/                   kind cluster, probes, autoscaler
 load-tests/            k6 scripts and the runner
-docs/experiments/      E0–E16: every experiment with its real numbers
+docs/experiments/      E0–E17: every experiment with its real numbers
 docs/interview-notes/  how to explain each phase: story → proof → fix → trade-off
 ```
 

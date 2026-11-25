@@ -322,10 +322,13 @@ The customer already has their 201 answer. Everything below happens without them
                confirms "stored", then marks them sent.
  3. QUEUE      RabbitMQ keeps the job safely on disk until a consumer takes it.
  4. CONSUMER   the worker takes up to 20 jobs at a time ("prefetch"). For each:
-                 already in sent_notifications?  → skip (it's a repeat)
-                 look up the customer's email (asks the identity module)
-                 send the email via SMTP → Mailpit
-                 remember the event id in sent_notifications
+                 already 'sent' in sent_notifications?  → skip (it's a repeat)
+                 the customer's email (in the event; older events: ask identity)
+                 CLAIM it: insert a 'sending' row (event id = primary key: only ONE copy can)
+                   lost: 'sent' → skip · 'sending' → retry in 5 s (the winner may crash)
+                   a 'sending' claim older than 60 s → its worker died: take it over
+                 send the email via SMTP → Mailpit (failed → delete the claim, retry later)
+                 mark the row 'sent'
                  tell RabbitMQ "done" (ack). Only now is the job removed.
  5. FAILURE    mail server down? → job goes to the retry queue, comes back 5 s later.
                Failed 12 times (~1 min)? → parked in the dead-letter queue for a human.
@@ -340,6 +343,12 @@ The customer already has their 201 answer. Everything below happens without them
 the note "sent", the note is sent again. That's called **at-least-once** delivery. It's fine because the consumer
 skips event ids it has already handled (an **idempotent consumer**). Analogy: the postman may ring twice,
 but you only sign once.
+
+**Why claim before sending? (E17)** Until then the consumer checked "already sent?", sent, then recorded it. Copies
+of the same event handled at the same moment all passed the check: 10 copies of 20 events → **196 and 169 emails**.
+Claiming first (one atomic INSERT decides who sends): **20 of 20**, twice, and 50 of 50 with 20 copies each. Like
+writing your name on the task board before starting, so nobody else does the same job. Still "at least once": a
+worker that dies between sending and marking 'sent' gets its claim taken over after 60 s, and that email goes twice.
 
 **Why does the API not talk to RabbitMQ at all?** So that RabbitMQ being down can never fail a checkout.
 The API only writes to MySQL; the worker deals with RabbitMQ.

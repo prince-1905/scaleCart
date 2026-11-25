@@ -21,6 +21,12 @@ export class CircuitBreaker {
   private openedAt = 0;
   private state: BreakerState = 'closed';
   private trialInFlight = false;
+  /**
+   * +1 every time the breaker opens. A call only counts if the breaker hasn't opened since the call started (E15b):
+   * under load, hundreds of calls are in flight when it opens, and each late timeout used to re-open it (2,362
+   * "now open" in one run), restart the open period, and free the half-open trial slot.
+   */
+  private generation = 0;
 
   constructor(
     private readonly options: { failureThreshold: number; openMs: number },
@@ -38,26 +44,38 @@ export class CircuitBreaker {
       if (waited < this.options.openMs) throw new CircuitOpenError(this.options.openMs - waited);
       this.set('half_open');
     }
+    let trial = false;
     if (this.state === 'half_open') {
       // Only one trial at a time; everyone else is refused until it answers.
       if (this.trialInFlight) throw new CircuitOpenError(0);
       this.trialInFlight = true;
+      trial = true;
     }
+    const generation = this.generation;
     try {
       const result = await call();
-      this.failures = 0;
-      if (this.state !== 'closed') this.set('closed');
+      if (generation === this.generation) {
+        this.failures = 0;
+        if (this.state !== 'closed') this.set('closed');
+      }
       return result;
     } catch (err) {
-      this.failures++;
-      if (this.state === 'half_open' || this.failures >= this.options.failureThreshold) {
-        this.openedAt = this.now();
-        this.set('open');
+      // A call that started before the breaker last opened tells us nothing new: not counted.
+      if (generation === this.generation) {
+        this.failures++;
+        if (trial || this.failures >= this.options.failureThreshold) this.open();
       }
       throw err;
     } finally {
-      this.trialInFlight = false;
+      if (trial) this.trialInFlight = false;
     }
+  }
+
+  private open() {
+    this.generation++;
+    this.failures = 0;
+    this.openedAt = this.now();
+    this.set('open');
   }
 
   private set(state: BreakerState) {

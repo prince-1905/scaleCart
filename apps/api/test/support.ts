@@ -65,6 +65,11 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   RATE_LIMIT_ENABLED: 'false',
   // Phase 8: the shared token for /internal/* calls between the shop and the payments service (tests only).
   INTERNAL_SERVICE_TOKEN: SERVICE_TOKEN,
+  // Phase 12: most suites search with MySQL (they don't run the indexer); search.e2e-spec.ts switches to OpenSearch
+  // with its own index, so the dev stack's "products" index is never touched.
+  SEARCH_ENGINE: 'mysql',
+  OPENSEARCH_URL: 'http://127.0.0.1:9200',
+  SEARCH_INDEX: 'test-products',
 };
 
 export async function startApp(

@@ -38,6 +38,8 @@ export function topology(prefix: string) {
     shopPayments: `${prefix}orders.payment-captured`,
     /** Consumed by the payments service. */
     paymentResults: `${prefix}payments.order-results`,
+    /** Phase 12: product.changed events for the search index (consumed by the worker's ProductIndexer). */
+    searchProducts: `${prefix}search.product-changes`,
   };
 }
 
@@ -88,6 +90,8 @@ export async function assertTopology(ch: Channel, t: Topology): Promise<void> {
   // declares the queue of the events it publishes (identically), and an event always has a place to wait.
   await consumerQueue(ch, t.events, t.shopPayments, PAYMENT_EVENTS.paymentCaptured);
   await consumerQueue(ch, t.events, t.paymentResults, PAYMENT_EVENTS.orderPaymentResult);
+  // Phase 12: the search index's copy of the catalog follows product changes.
+  await consumerQueue(ch, t.events, t.searchProducts, 'product.changed');
 }
 
 /** A quorum queue with a 5 s retry queue and a dead-letter queue: the same arguments as in apps/payments. */

@@ -109,13 +109,26 @@ mixed into the traffic, 5 users with old tokens and 5 with new ones.
 - Runs 1–2 used a flawed design (one user's new token sent ~50 req/s, over the per-user limit of 20/s: 429s) and are
   not counted. They had no 401s either.
 
-**Open observation (not explained):** while identity restarted inside the rotation, `/cart` got slow: p50 1.27–1.34 s
-(runs 3–4; 1.5–2.9 s in runs 1–2) for ~13 s, without errors. A trace of a slow request shows Kong's balancer waiting
-1.4–2.8 s with one try to the shop, and the shop's own span (4–10 ms) starting only at the end: the time passed before
-the shop read the request. Controls under the same traffic: recreating identity alone, p50 5.4–7.0 ms (max 3.4 s); with
-its migrate job, p50 7.4 ms (max 3.8 s); stopping and starting it (E14b), p50 7–12 ms. The rotation runs differ in also
-retrying `/auth/login` through Kong every 250 ms while identity is down (Kong logged only "connection refused" for
-those). The cause is not pinned down.
+**The "slow window" was my test script (found 2026-11-21, during E15f).** Runs 3–4 showed `/cart` at p50 1.27–1.34 s
+for ~13 s while identity restarted. Cause: `e12-gateway-ops.mjs` ran `docker compose up -d identity` with a *blocking*
+`execSync`. Node's event loop stopped, so the traffic generator sent nothing for those ~13 s, then fired every
+"missed" request at once. That burst was the slow window, and the trace matched it: time spent before the shop read the
+request. The script now runs shell commands without blocking (`exec`). Reruns with the fixed script:
+
+| Phase | Run 5 (fixed script) | Run 6 (fixed script) | Control: recreate identity + its deps (fixed script) |
+|---|---|---|---|
+| Before | 1,001 of 1,001 | 1,001 of 1,001 | 1,001 of 1,001 |
+| New key + Kong reload | 3,125 of 3,125 | 3,149 of 3,149 | – |
+| Identity restarting | **1,559 of 2,529** (970 failed: 501 no answer within 5 s, 469 × 500) | **1,229 of 1,229**, p50 5.3 ms, max 46 ms | 2,825 of 2,825, p50 6.0 ms |
+| Old and new tokens | 2,030 of 2,030 | 2,032 of 2,032 | – |
+| After | 1,000 of 1,000 | 1,001 of 1,001 | 1,000 of 1,000 |
+
+- With the fixed script the restart phase is **not slow** (p50 5.3–7.3 ms). Run 6 is clean.
+- **Run 5 had 970 failures** in a 10 s window (sent 42.8–52.5 s into the run), and identity took 25.3 s to give its
+  first login (12.3–13.7 s in the other runs). No power event in the System log at that time. Run 6 repeated the same
+  flow with 0 failures, so this was seen once and is **not explained**. Kong's logs from run 5 were lost (the gateway
+  was recreated right after, for the prune).
+- Same artifact, smaller, in E12's restart/reload timings: those were measured with the same blocking script.
 
 ---
 

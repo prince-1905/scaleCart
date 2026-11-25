@@ -85,8 +85,9 @@ Checkout puts the customer's email (from the token) into order.created → the w
 - Key ids (`kid`) let old and new keys be valid together. Rotation under traffic: new key → Kong hot-reloaded (30 ms)
   → identity restarted → 0 failed requests; old tokens worked, new ones too (the shop fetched the new key on first
   sight). Then the old keys were pruned.
-- Honest open point: during identity's restart in those runs, cart requests slowed to p50 ~1.3 s for ~13 s (trace:
-  time spent before the shop read the request). Not explained yet.
+- An apparent slowdown during identity's restart (p50 ~1.3 s) turned out to be my test script: a blocking `execSync`
+  froze the load generator, then it fired a burst. Fixed script: p50 5–7 ms. One rerun out of two still had 970
+  failures in a 10 s window; the other had 0. Not explained, reported as seen once.
 
 ---
 

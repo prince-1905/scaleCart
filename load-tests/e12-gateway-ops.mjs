@@ -19,7 +19,7 @@
  * second for the shop's start page (/shop/, served by NGINX itself). Every answer is recorded; the script prints what
  * customers saw in each phase. Plain fetch; 10 seed users share the product-page traffic (per-user limits).
  */
-import { execSync } from 'node:child_process';
+import { exec } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -36,7 +36,10 @@ if (!['down', 'restart', 'reload', 'jaeger', 'identity', 'rotate', 'recreate'].i
 const t0 = performance.now();
 const at = () => (performance.now() - t0) / 1000;
 const log = (...a) => console.log(`${at().toFixed(1).padStart(6)} s  ${new Date().toISOString().slice(11, 23)}`, ...a);
-const sh = (cmd) => execSync(cmd, { cwd: ROOT, stdio: 'pipe' }).toString().trim();
+// Async on purpose: a blocking execSync froze the traffic generator while docker worked, then fired every "missed"
+// request at once (found in E15f; it distorted the operation phases of E12/E14 measured with this script).
+const sh = (cmd) =>
+  new Promise((ok, fail) => exec(cmd, { cwd: ROOT, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => (err ? fail(err) : ok(stdout.toString().trim()))));
 
 /** Every answer: [sent at s, status (0 = no answer), ms, what]. */
 const answers = [];
@@ -130,12 +133,12 @@ await sleep(10_000);
 if (mode === 'down') {
   mark('gateway stopped');
   const s = performance.now();
-  sh('docker compose stop gateway');
+  await sh('docker compose stop gateway');
   log(`stop took ${((performance.now() - s) / 1000).toFixed(1)} s`);
   await sleep(30_000);
   mark('gateway starting');
   const u = performance.now();
-  sh('docker compose start gateway');
+  await sh('docker compose start gateway');
   log(`start command returned after ${((performance.now() - u) / 1000).toFixed(1)} s`);
   // First 200 after the start command.
   while (!answers.some((a) => a.phase === 'gateway starting' && a.what === 'api' && a.status === 200)) await sleep(50);
@@ -165,7 +168,7 @@ if (mode === 'down') {
   await tryLogin();
   mark('identity stopped');
   const down = performance.now();
-  sh('docker compose stop identity');
+  await sh('docker compose stop identity');
   log(`identity stopped in ${((performance.now() - down) / 1000).toFixed(1)} s`);
 
   // An order during the outage: checkout needs no identity; its confirmation email does (the address).
@@ -187,7 +190,7 @@ if (mode === 'down') {
   }
   mark('identity starting');
   const up = performance.now();
-  sh('docker compose start identity');
+  await sh('docker compose start identity');
   log(`start command returned after ${((performance.now() - up) / 1000).toFixed(1)} s`);
   // Logins again: first success after the start command.
   let firstLogin = NaN;
@@ -207,7 +210,7 @@ if (mode === 'down') {
     else await sleep(1_000);
   }
   log(Number.isNaN(mailAfter) ? 'confirmation email NOT delivered within 90 s after the outage' : `confirmation email delivered ${mailAfter.toFixed(1)} s after the order`);
-  log('dead-letter queue:', sh('docker exec scalecart-rabbitmq-1 rabbitmqctl list_queues name messages --quiet').split(/\r?\n/).filter((l) => /notifications.*dlq/.test(l)).join(' | '));
+  log('dead-letter queue:', (await sh('docker exec scalecart-rabbitmq-1 rabbitmqctl list_queues name messages --quiet')).split(/\r?\n/).filter((l) => /notifications.*dlq/.test(l)).join(' | '));
   const byPhase = Object.groupBy(loginTries, (l) => l.phase);
   for (const [p, tries] of Object.entries(byPhase)) {
     log(`logins in "${p}": ${tries.map((x) => `${x.status}/${Math.round(x.ms)}ms`).join(' ')}`);
@@ -215,7 +218,7 @@ if (mode === 'down') {
 } else if (mode === 'recreate') {
   mark('identity recreated');
   const s = performance.now();
-  sh(process.env.WITH_DEPS ? 'docker compose up -d --force-recreate identity' : 'docker compose up -d --force-recreate --no-deps identity');
+  await sh(process.env.WITH_DEPS ? 'docker compose up -d --force-recreate identity' : 'docker compose up -d --force-recreate --no-deps identity');
   log(`recreate command returned after ${((performance.now() - s) / 1000).toFixed(1)} s`);
   await sleep(20_000);
   mark('after');
@@ -229,16 +232,16 @@ if (mode === 'down') {
     );
   const oldKid = readEnv().IDENTITY_SIGNING_KEY_ID;
   mark('new key + Kong reload');
-  log(sh('node infra/identity/new-signing-key.mjs --rotate').split(/\r?\n/)[0]);
+  log((await sh('node infra/identity/new-signing-key.mjs --rotate')).split(/\r?\n/)[0]);
   const fresh = readEnv();
   // Kong learns the new public key without a restart: re-render its config inside the container, then hot-load it.
-  sh(`docker exec -e IDENTITY_PUBLIC_KEYS=${fresh.IDENTITY_PUBLIC_KEYS} scalecart-gateway-1 sh /kong/render.sh /tmp/kong-rotated.yml`);
-  log('Kong admin API:', sh('docker exec scalecart-gateway-1 resty /kong/reload.lua /tmp/kong-rotated.yml'));
+  await sh(`docker exec -e IDENTITY_PUBLIC_KEYS=${fresh.IDENTITY_PUBLIC_KEYS} scalecart-gateway-1 sh /kong/render.sh /tmp/kong-rotated.yml`);
+  log('Kong admin API:', await sh('docker exec scalecart-gateway-1 resty /kong/reload.lua /tmp/kong-rotated.yml'));
   await sleep(Number(process.env.GAP_S ?? 30) * 1000);
 
   mark('identity restart (new key)');
   const s = performance.now();
-  sh('docker compose up -d identity');
+  await sh('docker compose up -d identity');
   // Logins come back when identity is up; the first token signed with the new key joins the traffic.
   let newToken = '';
   for (let i = 0; i < 120 && !newToken; i++) {
@@ -268,36 +271,36 @@ if (mode === 'down') {
   await sleep(20_000);
   mark('after');
 } else if (mode === 'jaeger') {
-  const memory = () =>
-    sh('docker stats --no-stream --format "{{.Name}}={{.MemUsage}}" scalecart-api-4 scalecart-payments-1 scalecart-gateway-1')
+  const memory = async () =>
+    (await sh('docker stats --no-stream --format "{{.Name}}={{.MemUsage}}" scalecart-api-4 scalecart-payments-1 scalecart-gateway-1'))
       .split(/\r?\n/)
       .map((l) => l.replace('scalecart-', '').replace(/ \/ .*/, ''))
       .join('  ');
-  log('memory before:', memory());
+  log('memory before:', await memory());
   mark('jaeger stopped');
-  sh('docker compose stop jaeger');
+  await sh('docker compose stop jaeger');
   await sleep(30_000);
-  log('memory after 30 s without Jaeger:', memory());
+  log('memory after 30 s without Jaeger:', await memory());
   await sleep(30_000);
-  log('memory after 60 s without Jaeger:', memory());
+  log('memory after 60 s without Jaeger:', await memory());
   mark('jaeger back');
-  sh('docker compose start jaeger');
+  await sh('docker compose start jaeger');
   await sleep(20_000);
-  log('memory 20 s after Jaeger is back:', memory());
+  log('memory 20 s after Jaeger is back:', await memory());
   mark('after');
 } else if (mode === 'restart') {
   mark('restarting');
   const s = performance.now();
-  sh('docker compose restart gateway');
+  await sh('docker compose restart gateway');
   log(`restart command returned after ${((performance.now() - s) / 1000).toFixed(1)} s`);
   await sleep(10_000);
   mark('after');
 } else {
   mark('reload 1');
-  log('admin API answered', sh(RELOAD('30000', '30001')));
+  log('admin API answered', await sh(RELOAD('30000', '30001')));
   await sleep(10_000);
   mark('reload 2');
-  log('admin API answered', sh(RELOAD('30000', '30000')));
+  log('admin API answered', await sh(RELOAD('30000', '30000')));
   await sleep(10_000);
   mark('after');
 }

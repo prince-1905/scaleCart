@@ -9,7 +9,9 @@ import {
   Patch,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import { HttpAdapterHost } from '@nestjs/core';
 import { Public, Roles } from '../common/auth.js';
 import {
   CreateProductDto,
@@ -21,7 +23,10 @@ import { CatalogService } from './catalog.service.js';
 
 @Controller('products')
 export class ProductsController {
-  constructor(private readonly catalog: CatalogService) {}
+  constructor(
+    private readonly catalog: CatalogService,
+    private readonly adapterHost: HttpAdapterHost,
+  ) {}
 
   @Public()
   @Get()
@@ -29,10 +34,20 @@ export class ProductsController {
     return this.catalog.list(query);
   }
 
+  /** X-Search-Source says who answered: opensearch, mysql, or mysql-fallback (OpenSearch failed). */
   @Public()
   @Get('search')
-  search(@Query() query: SearchProductsQuery) {
-    return this.catalog.search(query);
+  async search(@Query() query: SearchProductsQuery, @Res({ passthrough: true }) res: unknown) {
+    const { items, source } = await this.catalog.searchWithSource(query);
+    this.adapterHost.httpAdapter.setHeader(res, 'x-search-source', source);
+    return items;
+  }
+
+  /** The filter sidebar: how many results per category and price range, for the same search (Phase 12). */
+  @Public()
+  @Get('search/facets')
+  facets(@Query() query: SearchProductsQuery) {
+    return this.catalog.facets(query);
   }
 
   @Public()

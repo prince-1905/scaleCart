@@ -57,6 +57,14 @@ export class SearchProductsQuery {
   @IsIn(PRODUCT_SORTS)
   sort: ProductSort = 'relevance';
 
+  /**
+   * LAB ONLY (experiment E15, needs LAB_ENDPOINTS): "all" also searches the 200k unlisted load-test products, so the
+   * two search engines can be compared on a big catalog. Shoppers only ever see listed (categorised) products.
+   */
+  @IsOptional()
+  @IsIn(['listed', 'all'])
+  scope?: 'listed' | 'all';
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

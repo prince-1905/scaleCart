@@ -139,6 +139,10 @@ services:
       PAYMENTS_URL: http://payments:3002
       # Phase 11: confirmation emails need the customer's address, from the identity service.
       IDENTITY_URL: http://identity:3003
+      # Phase 12: product search in OpenSearch (CQRS read model). SEARCH_ENGINE=mysql = the old MySQL FULLTEXT (E15).
+      OPENSEARCH_URL: http://opensearch:9200
+      SEARCH_ENGINE: ${SEARCH_ENGINE:-opensearch}
+      SEARCH_INDEX: products
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN in .env (see .env.example)}
       PAYMENT_JOBS_INTERVAL_SECONDS: ${PAYMENT_JOBS_INTERVAL_SECONDS:-30}
       NODE_OPTIONS: --max-old-space-size=192
@@ -173,6 +177,8 @@ services:
       # Used by `docker compose run --rm migrate node dist/seed.js`.
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SEED_USER_PASSWORD: ${SEED_USER_PASSWORD:-}
+      # Used by `docker compose run --rm migrate node dist/reindex.js` (Phase 12: rebuild the search index).
+      OPENSEARCH_URL: http://opensearch:9200
     depends_on:
       mysql:
         condition: service_healthy
@@ -200,6 +206,12 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (see .env.example)}
       # Phase 11: identity's public keys (JWKS) check access tokens; users' emails come from there too.
       IDENTITY_URL: http://identity:3003
+      # Phase 12: product search in OpenSearch (CQRS read model). SEARCH_ENGINE=mysql = the old MySQL FULLTEXT (E15).
+      OPENSEARCH_URL: http://opensearch:9200
+      SEARCH_ENGINE: ${SEARCH_ENGINE:-opensearch}
+      SEARCH_INDEX: products
+      # Max MySQL fallback searches at once when OpenSearch can't answer (bulkhead, E15b).
+      SEARCH_FALLBACK_CONCURRENCY: ${SEARCH_FALLBACK_CONCURRENCY:-4}
       REDIS_URL: redis://redis:6379
       CACHE_ENABLED: ${CACHE_ENABLED:-true}
       # Node's default is 511; bursts overflowed it (E2). Capped by net.core.somaxconn (4096).
@@ -441,6 +453,9 @@ services:
       KONG_PROXY_ERROR_LOG: /dev/stderr
       KONG_ADMIN_ERROR_LOG: /dev/stderr
       # Re-ask Docker's DNS often, so a restarted shop or payments container (new IP) is found within seconds.
+      # VALID_TTL caps Docker's own answer TTL (600 s): without it Kong kept recreated containers' OLD IPs for minutes
+      # (E15: shop and identity swapped IPs, logins went to the shop's port, searches to a dead address, 502s).
+      KONG_DNS_VALID_TTL: "5"
       KONG_DNS_STALE_TTL: "4"
       KONG_DNS_NOT_FOUND_TTL: "1"
       KONG_DNS_ORDER: LAST,A,CNAME
@@ -459,6 +474,32 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+
+  # Phase 12: product search (CQRS read model). A copy of the catalog built for searching (typos, ranking, facets),
+  # kept in sync from MySQL by events. MySQL stays the truth: prices for orders never come from here.
+  # One node, security plugin off: reachable only on the Docker network (and 127.0.0.1:9200 for experiments).
+  opensearch:
+    image: opensearchproject/opensearch:3.8.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=2s || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
 
   # Phase 10: trace storage + UI (all-in-one, in memory: traces are gone after a restart). UI: http://localhost:16686
   # Services send traces with OTLP over HTTP to jaeger:4318 (Docker network only).
@@ -507,6 +548,7 @@ services:
       - prometheus
 
 volumes:
+  opensearch-data:
   mysql-data:
   rabbitmq-data:
   prometheus-data:

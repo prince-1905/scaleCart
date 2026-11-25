@@ -9,6 +9,7 @@ import { ObservabilityModule } from '../observability/observability.module.js';
 import { OrdersCoreModule } from '../orders/orders-core.module.js';
 import { OutboxRelay } from '../orders/outbox-relay.js';
 import { DropsDataModule } from '../drops/drop-purchases.js';
+import { CatalogDataModule } from '../catalog/search/product-indexer.js';
 import { OrderExpiry } from '../orders/order-expiry.js';
 import { PaymentCapturedConsumer } from '../orders/payment-captured.consumer.js';
 import { PaymentsClient } from '../orders/payments-client.js';
@@ -54,6 +55,8 @@ export class WorkerModule {
         InventoryCoreModule,
         NotificationsModule,
         DropsDataModule,
+        // Phase 12: the catalog outbox (relay) and the search indexer.
+        CatalogDataModule,
       ],
       controllers: [WorkerHealthController],
       providers: [

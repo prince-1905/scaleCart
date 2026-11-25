@@ -214,7 +214,8 @@ The **refresh token** is the ticket you show at the gate to get a new wristband 
 
 **Filtered search (`GET /products/search?q=shoes&category=footwear&maxPriceCents=300000&sort=price_asc`)**
 is the same search plus category, price range and sorting, with up to 20 results. The AI assistant's
-`search_products` tool uses it.
+`search_products` tool uses it. Since Phase 12 it is answered by **OpenSearch** (typos forgiven, ranked), with MySQL
+as the backup: see §U.
 
 **Opening one product page (`GET /products/42`) uses the cache ("cache-aside"):**
 
@@ -604,6 +605,35 @@ lock found from one trace (3 of 3). 59 of 60 payment traces complete across Rabb
 Identity down 60 s: signed-in shoppers 100% ok; confirmation emails first lost, then fixed (sent within 0.3 s).
 RS256 check ~154–167 µs vs HS256 ~113–124 µs. Key rotation under traffic: 0 errors.
 
+### U. Searching, with a search engine next to MySQL (Phase 12: CQRS)
+
+```
+ admin edits a product   PATCH /products/42 → MySQL: the product row + a "product.changed" note in the catalog
+                         outbox, in ONE transaction (write side = the truth)
+ worker                  outbox relay → RabbitMQ (search.product-changes) → indexer reads product 42 FRESH from
+                         MySQL → puts it into OpenSearch (or removes it if it's gone). Old or repeated
+                         notes do no harm: it always copies the latest row.
+ GET /products/search    OpenSearch answers (read side): typos forgiven, name counts 3× more than description,
+                         category / price filters, sort. Header X-Search-Source says who answered.
+ GET /products/search/facets   counts per category and price range for the filter sidebar (one query)
+ OpenSearch slow / down  circuit breaker → MySQL FULLTEXT answers instead (exact words only), but at most 4 at once
+                         ("bulkhead"); more → quick 503 search_busy, so the backup can't drown MySQL and checkout
+ rebuild the index       docker compose run --rm migrate node dist/reindex.js → copies all products into a NEW
+                         index, switches the "products" name over in one step, copies what changed meanwhile, deletes
+                         the old index. Searches never see a half-built index.
+ prices, cart, checkout  always MySQL (the copy may be a moment behind; money never trusts it)
+```
+
+**Analogy:** MySQL is the warehouse ledger; OpenSearch is the shop-window catalog, reprinted from the ledger whenever a
+change note arrives. If the catalog is missing, the clerk checks the ledger by hand: slower, and only a few at a time.
+**Measured (E15):** 20 test queries found 20/20 on OpenSearch vs 9/20 on MySQL (MySQL found 0 of 9 typos). 50
+searches/s: p50 9–10 ms, MySQL CPU ~5% (MySQL FULLTEXT alone: 100–124% CPU). Facets p50 12–18 ms vs 32–72 ms.
+OpenSearch stopped for 30 s: 97–99% of searches still answered (by MySQL), the rest a quick 503. Re-index of 200k
+products under traffic: 8.7–37 s, the switch itself caused no errors. An admin's edit shows up in search after p50
+0.8 s (p95 1.2–1.4 s). Bugs found by the tests: the circuit breaker re-opened itself on late timeouts (2,362× in one
+run); a stopped OpenSearch made the cart fail through slow DNS lookups clogging Node's thread pool (fixed: 0 failures);
+Kong kept recreated containers' old IPs (fixed with `KONG_DNS_VALID_TTL`).
+
 ---
 
 ## 6. How we watch it (observability)
@@ -637,6 +667,7 @@ RS256 check ~154–167 µs vs HS256 ~113–124 µs. Key rotation under traffic: 
 | Cheaper tracing | Every instrumentation in the auto package is on; tracing costs ~10 points of shop CPU at 300 req/s even at 10% sampling, ~14 when every request is traced (E13a) | next small step |
 | Durable traces | Jaeger keeps 20,000 traces in memory; a restart loses them | with a real deployment |
 | Two gateways | One Kong: down = no API, restart = ~4 s of errors (E12c/d) | later |
+| Search extras | One OpenSearch node (no replica); stock isn't in the search copy (sold-out items still show); no synonyms ("trainers" ≠ "sneaker"); a typo in the first letter isn't forgiven | later |
 ---
 
 ## 8. How to tell it in an interview (2 minutes)

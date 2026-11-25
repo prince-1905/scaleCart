@@ -7,6 +7,13 @@ import { TEST_ENV } from './support.js';
 export default async function setup() {
   await migrateAll(loadDbConfig(TEST_ENV), { recreate: true });
 
+  // Phase 12: drop the test search indexes (test-products_<timestamp>); the worker in search.e2e creates a fresh one.
+  const os = TEST_ENV.OPENSEARCH_URL!;
+  const indexes = await fetch(`${os}/_cat/indices/${TEST_ENV.SEARCH_INDEX}_*?format=json`)
+    .then((r) => (r.ok ? (r.json() as Promise<{ index: string }[]>) : []))
+    .catch(() => []);
+  for (const { index } of indexes) await fetch(`${os}/${index}`, { method: 'DELETE' });
+
   const redis = createClient({ url: TEST_ENV.REDIS_URL });
   await redis.connect();
   await redis.flushDb();

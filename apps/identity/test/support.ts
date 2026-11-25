@@ -41,7 +41,8 @@ export const TEST_ENV: NodeJS.ProcessEnv = {
   IDENTITY_DB_USER: process.env.DB_USER ?? 'scalecart',
   IDENTITY_DB_PASSWORD: process.env.DB_PASSWORD,
   IDENTITY_DB_NAME: 'scalecart_test_identity',
-  REDIS_URL: 'redis://127.0.0.1:6379/2',
+  // REDIS_PORT (.env) = the Compose Redis's host port, when 6379 is taken by something else on the machine.
+  REDIS_URL: `redis://127.0.0.1:${process.env.REDIS_PORT ?? '6379'}/2`,
   IDENTITY_SIGNING_KEY: KEY.privateB64,
   IDENTITY_SIGNING_KEY_ID: KID,
   INTERNAL_SERVICE_TOKEN: SERVICE_TOKEN,

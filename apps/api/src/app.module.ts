@@ -12,6 +12,7 @@ import { loggerModule } from './observability/logger.js';
 import { ObservabilityModule } from './observability/observability.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { DropsModule } from './drops/drops.module.js';
+import { ReadReplicaModule } from './database/read-replica.js';
 import { RateLimitModule } from './rate-limit/rate-limit.module.js';
 
 @Module({})
@@ -24,6 +25,8 @@ export class AppModule {
         loggerModule(env),
         ObservabilityModule,
         HealthModule,
+        // Phase 13: browsing reads may use the read replica.
+        ReadReplicaModule,
         IdentityModule,
         // After IdentityModule: its guard runs after the AuthGuard, so it can see the user.
         RateLimitModule,

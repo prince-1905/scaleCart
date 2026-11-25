@@ -8,12 +8,13 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository, type EntityManager } from 'typeorm';
+import { DataSource, In, Repository, type EntityManager } from 'typeorm';
 import { CacheService } from '../cache/cache.service.js';
 import { ENV, type Env } from '../config/env.js';
 import { currentTraceparent } from '../common/trace-context.js';
 import { uuidv7 } from '../common/uuid.js';
 import { isDuplicateKey } from '../database/database.js';
+import { ReadReplica } from '../database/read-replica.js';
 import { PRODUCT_CHANGED, type ProductChangedEvent } from './events.js';
 import type {
   CreateProductDto,
@@ -92,6 +93,7 @@ export class CatalogService {
 
   constructor(
     @InjectRepository(Product, 'catalog') private readonly products: Repository<Product>,
+    private readonly reads: ReadReplica,
     private readonly cache: CacheService,
     private readonly searchIndex: ProductSearchIndex,
     private readonly metrics: MetricsService,
@@ -170,6 +172,9 @@ export class CatalogService {
    * Only browsing uses the cache. Checkout and the cart read prices with getById/getByIds
    * straight from MySQL: a few seconds of staleness is fine on a product page, never on
    * the amount we charge.
+   *
+   * Phase 13: the cache is filled from the PRIMARY, not the read replica. After an edit the cache entry is deleted;
+   * refilling it from a replica a few ms behind would store the OLD product for the whole TTL (60 s).
    */
   getPublic(id: number): Promise<ProductView | null> {
     return this.cache.getOrLoad('product', productKey(id), { ttl: this.ttl, missingTtl: 10 }, () =>
@@ -185,8 +190,14 @@ export class CatalogService {
    * Search results use the same id order, not relevance: ranking, typo tolerance and
    * facets are what a dedicated search engine (OpenSearch) is for.
    */
-  async list(query: ListProductsQuery): Promise<ProductPage> {
-    const qb = this.products
+  list(query: ListProductsQuery): Promise<ProductPage> {
+    // Phase 13: browsing, a moment old is fine → the read replica when it's healthy.
+    return this.reads.read('catalog', this.products.manager.connection, (db) => this.listFrom(db, query));
+  }
+
+  private async listFrom(db: DataSource, query: ListProductsQuery): Promise<ProductPage> {
+    const qb = db
+      .getRepository(Product)
       .createQueryBuilder('p')
       .orderBy('p.id', 'ASC')
       // One extra row tells us whether another page exists, without a COUNT(*).
@@ -218,8 +229,13 @@ export class CatalogService {
   }
 
   /** The same search with MySQL FULLTEXT (before Phase 12, and the fallback): every word required, prefixes allowed. */
-  private async mysqlSearch(query: SearchProductsQuery, scope: SearchScope): Promise<ProductView[]> {
-    const qb = this.mysqlFiltered(query, scope);
+  private mysqlSearch(query: SearchProductsQuery, scope: SearchScope): Promise<ProductView[]> {
+    // Phase 13: the fallback reads the replica when it's healthy, so an OpenSearch outage no longer loads the primary.
+    return this.reads.read('catalog', this.products.manager.connection, (db) => this.mysqlSearchOn(db, query, scope));
+  }
+
+  private async mysqlSearchOn(db: DataSource, query: SearchProductsQuery, scope: SearchScope): Promise<ProductView[]> {
+    const qb = this.mysqlFiltered(db, query, scope);
     if (!qb) return [];
     qb.limit(query.limit);
     const search = query.q?.trim() ? toBooleanQuery(query.q) : null;
@@ -234,8 +250,8 @@ export class CatalogService {
   }
 
   /** The WHERE part shared by search and facets; null when the text has nothing searchable (no results). */
-  private mysqlFiltered(query: SearchProductsQuery, scope: SearchScope) {
-    const qb = this.products.createQueryBuilder('p');
+  private mysqlFiltered(db: DataSource, query: SearchProductsQuery, scope: SearchScope) {
+    const qb = db.getRepository(Product).createQueryBuilder('p');
     if (scope === 'listed') qb.where('p.category IS NOT NULL');
     if (query.q?.trim()) {
       const search = toBooleanQuery(query.q);
@@ -249,8 +265,12 @@ export class CatalogService {
   }
 
   /** Facets on MySQL: one GROUP BY for the categories, one pass of conditional sums for the price ranges. */
-  private async mysqlFacets(query: SearchProductsQuery, scope: SearchScope): Promise<SearchFacets> {
-    const base = this.mysqlFiltered(query, scope);
+  private mysqlFacets(query: SearchProductsQuery, scope: SearchScope): Promise<SearchFacets> {
+    return this.reads.read('catalog', this.products.manager.connection, (db) => this.mysqlFacetsOn(db, query, scope));
+  }
+
+  private async mysqlFacetsOn(db: DataSource, query: SearchProductsQuery, scope: SearchScope): Promise<SearchFacets> {
+    const base = this.mysqlFiltered(db, query, scope);
     if (!base) return { total: 0, categories: [], priceRanges: PRICE_RANGES.map((r) => ({ key: r.key, count: 0 })) };
     const categories: { category: string; count: string }[] = await base
       .clone()

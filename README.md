@@ -34,6 +34,7 @@ Razorpay (test mode) · Gemini · Docker Compose · Kubernetes (kind) · Prometh
 | "Pay is slow" — but where? Metrics can't say, and one payment touches 3 services and 2 queue hops | Distributed tracing: OpenTelemetry in every service, Kong starts the trace, the outbox carries it through RabbitMQ, Jaeger shows it | Over 20 Pays: **79% of the time is Razorpay's API** (265 of 321 ms), the shop lookup 2.6 ms. A planted 2.8 s lock found from **one trace**. Cost: shop CPU ≈39% → ≈53% at 300 req/s (≈49% sampled at 10%) | [E13](docs/experiments/E13-tracing.md) |
 | A login rush (Argon2 on purpose) filled the shop's CPU: at 15 logins/s shoppers' p95 was 6–7 s, with timeouts. And one shared token secret meant a leak anywhere = forge any login | Identity split into its own service; tokens RS256 (only identity holds the private key, everyone else the public key); the customer's email travels in the event | Same rush: shoppers' p95 **14–15 ms, 0 errors** (even with the same total CPU: 0 errors). Identity down 60 s: signed-in shoppers unaffected; an outage test first **lost confirmation emails**, fixed (sent within 0.3 s). Key rotation under traffic: 0 errors | [E14](docs/experiments/E14-identity-service.md) |
 | Search on MySQL FULLTEXT: a typo = an empty page, and 50 searches/s used more than a whole MySQL core (the one checkout needs) | OpenSearch as a read copy (CQRS), kept in sync by outbox events; MySQL as the backup behind a circuit breaker and a bulkhead | Test queries found **20/20 vs 9/20** (typos 9/9 vs 0/9); MySQL CPU at 50 searches/s **~4.5% vs 100–124%**; an edit is searchable after **p50 0.8 s**. Failure tests found 3 bugs: the backup overloaded MySQL, the breaker re-opened itself 2,362×, a stopped OpenSearch broke the **cart** via slow DNS lookups (fixed: 0 failures) | [E15](docs/experiments/E15-search-cqrs.md) |
+| One MySQL served checkout AND every browsing read, incl. a dashboard that scans all orders | A read replica (async, GTID) for reads that may be a moment old; read-your-writes with `WAIT_FOR_EXECUTED_GTID_SET`; lag guard + bulkhead | Primary CPU **82–84% → 19–27%** at a moderate load. Without read-your-writes **18–76 of 100** customers didn't see the order they had just placed; with it **0 of 194** (0.8 ms extra). Found: an overloaded replica looked "down" and flooded the primary (checkout p50 22–30 s); with the bulkhead **0.6–0.7 s** | [E16](docs/experiments/E16-read-replica.md) |
 | An AI shopping assistant is slow and expensive | Measured where the time goes | Model rounds **1.2–1.8 s each**, our tools **16–113 ms**: latency = number of rounds | [E3.5](docs/experiments/E3.5-ai-assistant.md) |
 
 Also measured: one Node.js process handles ~4.3k trivial req/s, but 5 ms of CPU work drops that to ~150
@@ -62,6 +63,8 @@ flowchart LR
     PAY --> RZ
     API1 & API2 --> R[(Redis<br/>cache · waiting room<br/>stock gate · login limits)]
     API1 & API2 --> M[(MySQL<br/>one database per module)]
+    M -- binlog --> MR[(MySQL replica<br/>read-only copy)]
+    API1 & API2 -. browsing reads .-> MR
     API1 & API2 -- search --> OS[(OpenSearch<br/>search copy of products)]
     W -- "product.changed" --> OS
     API1 & API2 -. order + event<br/>in one transaction .-> M
@@ -88,6 +91,9 @@ flowchart LR
 - **Search reads a copy (CQRS).** MySQL holds the products; OpenSearch holds a search-friendly copy (typos forgiven,
   ranked, facets), updated from `product.changed` events through the outbox. If OpenSearch is down, MySQL answers,
   a few at a time.
+- **Browsing reads a copy of the database.** Product lists, order history and the admin dashboard read a MySQL
+  replica a few ms behind; a customer's own orders wait until the copy has their latest checkout. Writes and money
+  reads never use it.
 - **Money paths always read MySQL.** Redis only speeds things up (cache, queue tickets, the stock gate). If Redis goes
   down, drops pause but can never oversell.
 
@@ -114,7 +120,7 @@ Copy-Item .env.example .env        # fill in your own secrets; .env is never com
 node infra/identity/new-signing-key.mjs               # the RSA key that signs login tokens (written into .env)
 cd apps/web; npm install; npm run build; cd ../..     # the shop, served by NGINX at /shop/
 docker compose build api; docker compose build payments; docker compose build identity   # one at a time (parallel builds race)
-docker compose up -d               # mysql, redis, rabbitmq, mailpit, opensearch, migrations, api, worker, payments, identity, kong, nginx, …
+docker compose up -d               # mysql + its read replica, redis, rabbitmq, mailpit, opensearch, migrations, api, worker, payments, identity, kong, nginx, …
 docker compose run --rm -e SEED_PRODUCTS=200000 migrate node dist/seed.js         # demo products
 docker compose run --rm migrate node dist/reindex.js                              # copy them into OpenSearch (search)
 docker compose run --rm -e SEED_USERS=2000 identity-migrate node dist/seed.js     # the admin + load-test users
@@ -146,7 +152,7 @@ http://localhost:8089.
 ### Tests
 
 ```powershell
-cd apps/api; npm test; npm run test:e2e        # shop: 77 unit, 147 end-to-end (needs: docker compose up -d mysql redis rabbitmq mailpit opensearch)
+cd apps/api; npm test; npm run test:e2e        # shop: 77 unit, 152 end-to-end (needs: docker compose up -d mysql mysql-replica redis rabbitmq mailpit opensearch)
 cd apps/payments; npm test; npm run test:e2e   # payments service: 18 unit, 29 end-to-end
 cd apps/identity; npm test; npm run test:e2e   # identity service: 16 unit, 26 end-to-end (logins, 2FA, keys, rotation)
 node infra/kong/check-gateway.mjs              # 16 gateway rules against the running stack (tokens, routes, 404s)
@@ -167,7 +173,7 @@ Fastify and Express. Key tests are
 
 `run.ps1` prints a per-step table and checks that k6 itself wasn't the bottleneck. Switches for the experiments include
 `STOCK_RESERVATION=atomic|locking|naive`, `HTTP_ADAPTER=fastify|express`, `NOTIFY_MODE=outbox|sync`, `CACHE_ENABLED`,
-`DROP_STOCK_GATE`, `RATE_LIMIT_ENABLED`, `SEARCH_ENGINE=opensearch|mysql`, `API_REPLICAS` and `API_CPUS`. The rate limiter is on by default; older load
+`DROP_STOCK_GATE`, `RATE_LIMIT_ENABLED`, `SEARCH_ENGINE=opensearch|mysql`, `READ_REPLICA=on|off`, `API_REPLICAS` and `API_CPUS`. The rate limiter is on by default; older load
 tests send everything from one IP, so run them with `RATE_LIMIT_ENABLED=false`.
 
 ## Repository layout
@@ -181,7 +187,7 @@ apps/demo/             the earlier one-page demo (/demo/)
 infra/                 MySQL init, NGINX (edge), Kong (API gateway), Jaeger (tracing), Prometheus, Grafana (dashboards provisioned automatically)
 k8s/                   kind cluster, probes, autoscaler
 load-tests/            k6 scripts and the runner
-docs/experiments/      E0–E15: every experiment with its real numbers
+docs/experiments/      E0–E16: every experiment with its real numbers
 docs/interview-notes/  how to explain each phase: story → proof → fix → trade-off
 ```
 
@@ -189,7 +195,7 @@ docs/interview-notes/  how to explain each phase: story → proof → fix → tr
 
 | | |
 |---|---|
-| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong), distributed tracing (OpenTelemetry + Jaeger), identity as its own service (RS256 tokens), search engine + CQRS (OpenSearch) |
-| Next | Other system-design topics (read replicas, CDN…) · cloud load tests |
+| ✅ Done | Shop core, caching, queues + outbox, Razorpay payments, drops + waiting room, Redis stock gate, Kubernetes, AI assistant, React storefront + admin, API-wide rate limiting, two-step login (authenticator app), payments as its own service, API gateway (Kong), distributed tracing (OpenTelemetry + Jaeger), identity as its own service (RS256 tokens), search engine + CQRS (OpenSearch), MySQL read replica |
+| Next | Other system-design topics (CDN…) · cloud load tests |
 What isn't built yet, honestly: real refunds in live test mode, reconciliation of lost webhooks, push "your turn"
 notifications (the drop page polls), and Lighthouse or real-browser tests for the shop.

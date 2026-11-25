@@ -634,6 +634,35 @@ products under traffic: 8.7–37 s, the switch itself caused no errors. An admin
 run); a stopped OpenSearch made the cart fail through slow DNS lookups clogging Node's thread pool (fixed: 0 failures);
 Kong kept recreated containers' old IPs (fixed with `KONG_DNS_VALID_TTL`).
 
+### V. Reading from a copy of the database (Phase 13: read replica)
+
+```
+ mysql (primary)          every write; cart, checkout, prices, stock, payments; filling the product-page cache
+   │ binary log (every committed change, with a GTID = a unique id per transaction)
+   ▼
+ mysql-replica            a read-only copy (super_read_only: even root can't write), a few ms behind
+                          product lists, admin dashboard + order list, the search backup (MySQL FULLTEXT), "My orders"
+ worker                   stamps the time into replication_heartbeat on the primary every 250 ms
+ shop (ReadReplica)       every second reads that stamp FROM THE REPLICA: now − stamp = how far behind it is
+                          ok (≤ 2 s behind)        → those reads go to the replica
+                          behind / down            → they go to the primary, but at most 4 at once; more get a
+                                                     quick 503 "read_busy" (bulkhead: the primary is for checkout)
+ checkout                 after the order commits: remember the primary's executed GTIDs for this customer (Redis,
+                          10 s)
+ "My orders" (that user)  ask the replica WAIT_FOR_EXECUTED_GTID_SET(those GTIDs, 50 ms): has it → replica; not yet
+                          → primary. So a customer always sees the order they just placed.
+```
+
+**Analogy:** the original ledger stays with the cashier; the front desk reads a photocopy that is reprinted every few
+milliseconds. A customer who just paid is checked against the original until the copy shows their payment.
+**Set up:** `docker compose up -d` runs `replica-setup` (idempotent): the clone plugin copies the primary, then
+replication starts and the copy is made read-only. Switches: `READ_REPLICA=off` (every read on the primary),
+`READ_FALLBACK_CONCURRENCY`, `READ_YOUR_WRITES=off` (only to show the stale-read bug).
+**Measured (E16):** copy 4–13 ms behind (p50, idle). Moderate load: primary CPU 82–84% → 19–27%. Without
+read-your-writes 18–76 of 100 customers didn't see the order they had just placed; with it 0 of 194 (wait 0.8 ms on
+average). Found: an overloaded replica was marked "down" and its reads flooded the primary (checkout p50 22–30 s);
+with the bulkhead checkout p50 0.6–0.7 s at the same load.
+
 ---
 
 ## 6. How we watch it (observability)
@@ -667,6 +696,7 @@ Kong kept recreated containers' old IPs (fixed with `KONG_DNS_VALID_TTL`).
 | Cheaper tracing | Every instrumentation in the auto package is on; tracing costs ~10 points of shop CPU at 300 req/s even at 10% sampling, ~14 when every request is traced (E13a) | next small step |
 | Durable traces | Jaeger keeps 20,000 traces in memory; a restart loses them | with a real deployment |
 | Two gateways | One Kong: down = no API, restart = ~4 s of errors (E12c/d) | later |
+| Replica extras | One async replica: if the primary dies, nobody takes over automatically (no failover/promotion); the product-page cache still fills from the primary; a paid order's new status can be a moment stale in "My orders" (only checkout is remembered for read-your-writes) | later |
 | Search extras | One OpenSearch node (no replica); stock isn't in the search copy (sold-out items still show); no synonyms ("trainers" ≠ "sneaker"); a typo in the first letter isn't forgiven | later |
 ---
 

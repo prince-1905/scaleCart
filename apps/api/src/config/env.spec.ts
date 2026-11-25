@@ -18,6 +18,7 @@ describe('loadEnv', () => {
         password: '',
         databasePrefix: 'scalecart_',
         poolSize: 5,
+        replica: null,
       },
       jwtSecret: SECRET,
       identityUrl: 'http://127.0.0.1:3003',

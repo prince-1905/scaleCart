@@ -42,6 +42,25 @@ export interface DbConfig {
   databasePrefix: string;
   /** Connections per module pool. Total per process = poolSize x number of modules. */
   poolSize: number;
+  /** Phase 13: the read replica, or null: every read goes to the primary. */
+  replica: ReplicaConfig | null;
+}
+
+export interface ReplicaConfig {
+  host: string;
+  port: number;
+  /** Connections per module pool on the replica (only the modules that read from it). */
+  poolSize: number;
+  /** Further behind than this (or no heartbeat) → reads go to the primary until it catches up. */
+  maxLagSeconds: number;
+  /** Replica down or behind: at most this many of its reads run on the primary at once; more get 503 (E16a). */
+  fallbackConcurrency: number;
+  /** Off only for E16: a customer's own reads then use the replica like any other read (the stale-read bug). */
+  readYourWrites: boolean;
+  /** After a customer's own write: wait at most this long for the replica to have it, else read the primary. */
+  readYourWritesWaitMs: number;
+  /** How long a customer's write is remembered for that check. */
+  readYourWritesTtlMs: number;
 }
 
 export interface Env {
@@ -175,6 +194,20 @@ export function loadDbConfig(source: NodeJS.ProcessEnv = process.env): DbConfig 
     password: source.DB_PASSWORD ?? '',
     databasePrefix: source.DB_PREFIX ?? 'scalecart_',
     poolSize: positiveInt(source, 'DB_POOL_SIZE', 5),
+    // DB_READ_HOST set = use the replica; READ_REPLICA=off sends every read to the primary (E16 comparisons).
+    replica:
+      source.DB_READ_HOST && source.READ_REPLICA !== 'off'
+        ? {
+            host: source.DB_READ_HOST,
+            port: positiveInt(source, 'DB_READ_PORT', 3306),
+            poolSize: positiveInt(source, 'DB_READ_POOL_SIZE', positiveInt(source, 'DB_POOL_SIZE', 5)),
+            maxLagSeconds: positiveInt(source, 'READ_REPLICA_MAX_LAG_SECONDS', 2),
+            fallbackConcurrency: positiveInt(source, 'READ_FALLBACK_CONCURRENCY', 4),
+            readYourWrites: source.READ_YOUR_WRITES !== 'off',
+            readYourWritesWaitMs: nonNegativeInt(source, 'READ_YOUR_WRITES_WAIT_MS', 50),
+            readYourWritesTtlMs: positiveInt(source, 'READ_YOUR_WRITES_TTL_MS', 10_000),
+          }
+        : null,
   };
 }
 

@@ -3,9 +3,11 @@ import http from 'k6/http';
 import { BASE_URL } from './steps.js';
 
 export const JSON_HEADERS = { 'Content-Type': 'application/json' };
-export const ADMIN_EMAIL = __ENV.ADMIN_EMAIL || 'admin@scalecart.local';
-// From .env (run.ps1 loads it). Only scripts that log in as admin need it.
-export const ADMIN_PASSWORD = __ENV.ADMIN_PASSWORD || '';
+// The seed admin has 2FA on (its login answers with a code challenge), so scripts use the lab admin when .env has
+// LAB_ADMIN_PASSWORD (created for E15d). Passwords come from .env (run.ps1 loads them).
+const LAB_ADMIN = !__ENV.ADMIN_EMAIL && !!__ENV.LAB_ADMIN_PASSWORD;
+export const ADMIN_EMAIL = __ENV.ADMIN_EMAIL || (LAB_ADMIN ? 'e15-admin@scalecart.local' : 'admin@scalecart.local');
+export const ADMIN_PASSWORD = (LAB_ADMIN ? __ENV.LAB_ADMIN_PASSWORD : __ENV.ADMIN_PASSWORD) || '';
 export const USER_PASSWORD = __ENV.SEED_USER_PASSWORD || 'loadtest-password';
 
 /** Seeded by `SEED_USERS=n node dist/seed.js`. */

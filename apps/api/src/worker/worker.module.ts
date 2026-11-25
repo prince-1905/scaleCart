@@ -13,6 +13,8 @@ import { CatalogDataModule } from '../catalog/search/product-indexer.js';
 import { OrderExpiry } from '../orders/order-expiry.js';
 import { PaymentCapturedConsumer } from '../orders/payment-captured.consumer.js';
 import { PaymentsClient } from '../orders/payments-client.js';
+import { ReadReplicaModule } from '../database/read-replica.js';
+import { ReplicationHeartbeat } from '../orders/replication-heartbeat.js';
 import { CleanupService } from './cleanup.service.js';
 
 /**
@@ -57,6 +59,8 @@ export class WorkerModule {
         DropsDataModule,
         // Phase 12: the catalog outbox (relay) and the search indexer.
         CatalogDataModule,
+        // Phase 13: OrdersService reads through it (off in the worker: no DB_READ_HOST).
+        ReadReplicaModule,
       ],
       controllers: [WorkerHealthController],
       providers: [
@@ -67,6 +71,8 @@ export class WorkerModule {
         PaymentCapturedConsumer,
         PaymentsClient,
         OrderExpiry,
+        // Phase 13: the replica's heartbeat (one writer).
+        ReplicationHeartbeat,
       ],
       exports: [ENV],
     };

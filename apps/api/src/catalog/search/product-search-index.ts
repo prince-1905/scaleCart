@@ -95,11 +95,14 @@ export class ProductSearchIndex {
    * With timestamped names each would add its own and writes to the alias would fail ("no write index").
    */
   async ensureIndex(): Promise<void> {
-    const exists = await this.client.indices.existsAlias({ name: this.alias });
+    // An admin operation, not a shopper's search: creating an index on a busy node can take seconds, more than the
+    // 1 s search timeout (the e2e setup timed out on it under load).
+    const admin = { requestTimeout: 30_000 };
+    const exists = await this.client.indices.existsAlias({ name: this.alias }, admin);
     if (exists.body) return;
     const index = `${this.alias}_1`;
     try {
-      await this.client.indices.create({ index, body: { ...PRODUCT_MAPPING, aliases: { [this.alias]: {} } } });
+      await this.client.indices.create({ index, body: { ...PRODUCT_MAPPING, aliases: { [this.alias]: {} } } }, admin);
       this.logger.log(`created search index ${index} (alias ${this.alias})`);
     } catch (err) {
       const type = (err as { meta?: { body?: { error?: { type?: string } } } }).meta?.body?.error?.type;
@@ -107,9 +110,24 @@ export class ProductSearchIndex {
     }
   }
 
-  /** Write one product's latest state (or remove it when it no longer exists in MySQL). */
+  /**
+   * Write one product's latest state (or remove it when it no longer exists in MySQL).
+   *
+   * `require_alias`: write only through the alias. Without it, a write that came before the alias existed (OpenSearch
+   * slow at the worker's start) made OpenSearch auto-create a plain INDEX named like the alias, and from then on the
+   * alias, and so the zero-downtime re-index, could never be created (found in Phase 13's test runs). Now such a
+   * write fails, the alias is created properly, and the write is retried.
+   */
   async put(doc: ProductDocument): Promise<void> {
-    await this.client.index({ index: this.alias, id: String(doc.id), body: doc });
+    const write = () => this.client.index({ index: this.alias, id: String(doc.id), body: doc, require_alias: true });
+    try {
+      await write();
+    } catch (err) {
+      const type = (err as { meta?: { body?: { error?: { type?: string } } } }).meta?.body?.error?.type;
+      if (type !== 'index_not_found_exception') throw err;
+      await this.ensureIndex();
+      await write();
+    }
   }
 
   async remove(id: number): Promise<void> {
